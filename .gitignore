@@ -1,0 +1,18 @@
+# Generated
+Cargo.lock
+target/
+
+# Tauri generated
+gen/
+
+# Env / secrets
+.env
+.env.local
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "rs-sc",
+  "version": "0.1.0",
+  "identifier": "com.zhlx2005.rssc",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "label": "result",
+        "title": "rs-sc · 翻译结果",
+        "width": 560,
+        "height": 360,
+        "resizable": true,
+        "center": true,
+        "minWidth": 360,
+        "minHeight": 200,
+        "decorations": true,
+        "visible": false
+      },
+      {
+        "label": "settings",
+        "title": "rs-sc · 设置",
+        "url": "settings.html",
+        "width": 480,
+        "height": 520,
+        "resizable": false,
+        "center": true,
+        "minWidth": 480,
+        "minHeight": 520,
+        "decorations": true,
+        "visible": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "targets": "all"
+  },
+  "plugins": {
+    "global-shortcut": null
+  }
+}

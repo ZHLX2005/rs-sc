@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>rs-sc · 翻译结果</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="result-header">
+      <span class="dot"></span>
+      <span class="title">译文</span>
+      <button id="copy-btn" class="ghost" title="复制">复制</button>
+      <button id="close-btn" class="ghost" title="关闭">×</button>
+    </header>
+
+    <main class="result-body">
+      <section id="text-pane" class="text-pane">
+        <p id="status" class="status">等待结果…</p>
+        <pre id="result" class="result" hidden></pre>
+      </section>
+      <aside id="image-pane" class="image-pane" hidden>
+        <img id="thumb" alt="截图" />
+      </aside>
+    </main>
+
+    <footer class="result-footer">
+      <span id="hint">提示: 关闭后再次按 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> 即可</span>
+    </footer>
+
+    <script src="./result.js"></script>
+  </body>
+</html>

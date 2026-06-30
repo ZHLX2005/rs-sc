@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>rs-sc · 设置</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="settings-body">
+    <header class="settings-header">
+      <span class="title">rs-sc 设置</span>
+      <span class="subtitle">配置 OpenAI 兼容接口与全局快捷键</span>
+    </header>
+
+    <main class="settings-body-main">
+      <div class="status-bar" id="status-bar" hidden></div>
+
+      <form id="settings-form" autocomplete="off" spellcheck="false">
+        <div class="field">
+          <label for="baseUrl">Base URL</label>
+          <input
+            type="url"
+            id="baseUrl"
+            name="baseUrl"
+            placeholder="https://api.openai.com/v1/chat/completions"
+            required
+          />
+          <p class="hint">支持任意 OpenAI 兼容服务: OpenAI / DeepSeek / Ollama / Azure 等</p>
+        </div>
+
+        <div class="field">
+          <label for="apiKey">API Key</label>
+          <div class="input-row">
+            <input
+              type="password"
+              id="apiKey"
+              name="apiKey"
+              placeholder="sk-...  (本地 Ollama 可留空)"
+              autocomplete="new-password"
+            />
+            <button type="button" id="toggle-key" class="ghost small" title="显示/隐藏">👁</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="model">Model</label>
+          <input
+            type="text"
+            id="model"
+            name="model"
+            placeholder="gpt-4o-mini"
+            required
+          />
+          <div class="chips" id="model-chips">
+            <button type="button" class="chip" data-model="gpt-4o-mini">gpt-4o-mini</button>
+            <button type="button" class="chip" data-model="gpt-4o">gpt-4o</button>
+            <button type="button" class="chip" data-model="deepseek-chat">deepseek-chat</button>
+            <button type="button" class="chip" data-model="llava">llava (本地)</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="prompt">Prompt</label>
+          <textarea
+            id="prompt"
+            name="prompt"
+            rows="3"
+            placeholder="发给模型的指令,会附加在图片前"
+          ></textarea>
+        </div>
+
+        <div class="field">
+          <label for="hotkey">截屏快捷键</label>
+          <div class="input-row">
+            <input
+              type="text"
+              id="hotkey"
+              name="hotkey"
+              placeholder="CommandOrControl+Shift+T"
+              required
+            />
+            <button type="button" id="record-hotkey" class="ghost small" title="录制组合键">录制</button>
+          </div>
+          <p class="hint">
+            格式: <code>Ctrl/CommandOrControl</code> + <code>Shift</code> + <code>Alt</code> + 字母/数字/F1-F12,
+            用 <code>+</code> 连接,例 <code>Ctrl+Alt+Q</code>。点"录制"后按想要的组合。
+          </p>
+        </div>
+
+        <div class="field">
+          <label for="settingsHotkey">打开设置快捷键</label>
+          <div class="input-row">
+            <input
+              type="text"
+              id="settingsHotkey"
+              name="settingsHotkey"
+              placeholder="CommandOrControl+Shift+P"
+              required
+            />
+            <button type="button" id="record-settings-hotkey" class="ghost small" title="录制组合键">录制</button>
+          </div>
+          <p class="hint">
+            用于随时打开本设置面板。<b>默认 Ctrl+Shift+P</b>——托盘图标在 Win11 上有时会被自动折叠到通知区不可见,
+            所以再给你一条直接进设置的快捷键兜底。
+          </p>
+        </div>
+      </form>
+    </main>
+
+    <footer class="settings-footer">
+      <button id="test-btn" class="ghost">测试连接</button>
+      <span class="spacer"></span>
+      <button id="cancel-btn" class="ghost">取消</button>
+      <button id="save-btn" class="primary">保存</button>
+    </footer>
+
+    <script src="./settings.js"></script>
+  </body>
+</html>

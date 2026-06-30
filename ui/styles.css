@@ -1,0 +1,293 @@
+/* rs-sc result window — small floating card, no clutter */
+
+:root {
+  --bg: #0f1115;
+  --card: #181b22;
+  --line: #262a33;
+  --text: #e7e9ee;
+  --sub: #8b93a3;
+  --accent: #4a9eff;
+  --accent-soft: #4a9eff22;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  overflow: hidden;
+  user-select: text;
+}
+
+.result-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+
+.result-header .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent);
+}
+
+.result-header .title {
+  flex: 1;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+}
+
+.ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--sub);
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.ghost:hover { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
+
+.result-body {
+  display: flex;
+  height: calc(100% - 80px);
+}
+
+.text-pane {
+  flex: 1;
+  padding: 16px 18px;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+.image-pane {
+  width: 40%;
+  min-width: 160px;
+  border-left: 1px solid var(--line);
+  background: #0a0c10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  overflow: hidden;
+}
+.image-pane img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  object-fit: contain;
+}
+
+.status {
+  color: var(--sub);
+  font-size: 13px;
+}
+.status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sub);
+  margin-right: 8px;
+  vertical-align: middle;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1.0;  }
+}
+.status-error {
+  color: #f0a0a0;
+  background: #2a1212;
+  margin: -16px -18px 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #6e1f1f;
+}
+.status-error::before { background: #f0a0a0; animation: none; }
+
+.result {
+  font-size: 15px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.result-footer {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 8px 14px;
+  background: var(--card);
+  border-top: 1px solid var(--line);
+  color: var(--sub);
+  font-size: 11px;
+}
+.result-footer kbd {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin: 0 1px;
+  font-family: inherit;
+  font-size: 10px;
+}
+
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ── Settings window ────────────────────────────────────────────────────────── */
+
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.settings-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+.settings-header .title { font-weight: 700; font-size: 15px; }
+.settings-header .subtitle { color: var(--sub); font-size: 11px; }
+
+.settings-body-main {
+  flex: 1;
+  padding: 14px 18px 4px;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+.settings-body-main .field { margin-bottom: 12px; }
+.settings-body-main label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sub);
+  margin-bottom: 4px;
+  letter-spacing: 0.3px;
+}
+
+.settings-body-main input[type="text"],
+.settings-body-main input[type="url"],
+.settings-body-main input[type="password"],
+.settings-body-main textarea {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 10px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  transition: border-color .15s, background .15s;
+}
+.settings-body-main input:focus,
+.settings-body-main textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: #13161c;
+}
+.settings-body-main textarea { resize: vertical; min-height: 56px; line-height: 1.45; }
+
+.settings-body-main .hint {
+  font-size: 11px;
+  color: var(--sub);
+  margin-top: 4px;
+  line-height: 1.45;
+}
+.settings-body-main .hint code {
+  background: #0a0c10;
+  border: 1px solid var(--line);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  color: var(--text);
+}
+
+.input-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.input-row input { flex: 1; }
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.chip {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--sub);
+  padding: 3px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.chip:hover { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
+
+.ghost.small { font-size: 11px; padding: 3px 9px; }
+
+button.recording {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.settings-footer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--card);
+}
+.settings-footer .spacer { flex: 1; }
+
+button.primary {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #fff;
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: filter .15s;
+}
+button.primary:hover:not(:disabled) { filter: brightness(1.1); }
+button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Status bar (used by settings + result if needed) ──────────────────────── */
+
+.status-bar {
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  background: #13161c;
+  color: var(--text);
+}
+.status-bar.ok    { border-color: #1f6e3b; color: #6fd295; background: #11251a; }
+.status-bar.error { border-color: #6e1f1f; color: #f0a0a0; background: #2a1212; }
+.status-bar.info  { color: var(--sub); }
