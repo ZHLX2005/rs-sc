@@ -32,6 +32,9 @@ pub enum CaptureCommand {
         monitor_y: i32,
         event_tx: mpsc::Sender<CaptureEvent>,
     },
+    /// Close the active overlay window without sending a Selection. Used when
+    /// a fresh capture hotkey press wants to abort the previous one mid-drag.
+    Cancel,
     Close,
 }
 
@@ -115,6 +118,15 @@ pub fn start_capture(
 
 pub fn close_capture() {
     let _ = capture_proxy().send_event(CaptureCommand::Close);
+}
+
+/// Abort the current capture overlay without sending a Selection event. The
+/// pending recv() on the caller's `event_tx` side will block until the
+/// pipeline notices the close and drops its `Sender`. We use a fire-and-
+/// forget mpsc channel (`((), ())`) for the result-notification half so
+/// cancelled captures don't deadlock the recv() in main.
+pub fn cancel_capture() {
+    let _ = capture_proxy().send_event(CaptureCommand::Cancel);
 }
 
 // ── Internal handler ──────────────────────────────────────────────────────────
@@ -439,6 +451,13 @@ impl ApplicationHandler<CaptureCommand> for CaptureHandler {
                 if let HandlerState::Selecting(session) = &self.state {
                     let _ = session.event_tx.send(CaptureEvent::Cancelled);
                 }
+                self.close_window();
+            }
+            CaptureCommand::Cancel => {
+                // External cancellation: a fresh hotkey press wants to abort
+                // the in-flight drag. We do NOT send a Cancelled event on the
+                // mpsc — the caller's pipeline_inner is about to be torn down
+                // anyway and is using a oneshot result channel. Just close.
                 self.close_window();
             }
         }

@@ -83,7 +83,25 @@ impl LlmTranslateClient {
     }
 
     /// Send a PNG to the multimodal model and return the translated text.
-    pub async fn translate_png(&self, png_bytes: &[u8]) -> AppResult<String> {
+    ///
+    /// `cancel` is checked before starting the network call and raced against
+    /// the in-flight request via `tokio::select!`. When the user presses the
+    /// capture hotkey again, the previous pipeline flips this flag, the
+    /// `select!` arm wins, and we return immediately so the new capture can
+    /// start without waiting for a slow model response.
+    pub async fn translate_png(
+        &self,
+        png_bytes: &[u8],
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> AppResult<String> {
+        // Cheap fast-path: if we've already been cancelled, don't even build
+        // the request body.
+        if let Some(c) = cancel {
+            if c.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(AppError::Capture("cancelled".into()));
+            }
+        }
+
         // Take a snapshot of the config so we don't hold the read lock across the
         // network round-trip.
         let cfg = self.config.read().await.clone();
@@ -114,10 +132,40 @@ impl LlmTranslateClient {
             req = req.header("Authorization", format!("Bearer {}", cfg.api_key));
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| AppError::Ai(format!("translate request failed: {e}")))?;
+        // Build a future for the network round-trip. We can't await it twice
+        // (it'd move req), so we keep it as a pinned Send future and select!
+        // against either it or a cancellation signal.
+        let send_fut = req.send();
+        tokio::pin!(send_fut);
+
+        let resp = if let Some(c) = cancel {
+            // Poll both the send and the cancel flag every 100ms. We can't use
+            // a notify channel here without restructuring the LLM client, but
+            // 100ms is well under any user's hotkey-press latency, so the
+            // detection lag is imperceptible.
+            loop {
+                if c.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(AppError::Capture("cancelled".into()));
+                }
+                tokio::select! {
+                    biased;
+                    r = &mut send_fut => break r,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
+                }
+            }
+        } else {
+            send_fut.await
+        }
+        .map_err(|e| AppError::Ai(format!("translate request failed: {e}")))?;
+
+        // Re-check after the response comes back: even if we weren't cancelled
+        // mid-flight, the user may have pressed the hotkey while we were
+        // reading the body.
+        if let Some(c) = cancel {
+            if c.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(AppError::Capture("cancelled".into()));
+            }
+        }
 
         let status = resp.status();
         let body = resp

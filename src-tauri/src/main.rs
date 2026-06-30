@@ -15,6 +15,7 @@ mod models;
 mod settings;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -28,7 +29,7 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::capture_window::CaptureEvent;
 
@@ -40,6 +41,36 @@ const RESULT_ERROR_EVENT: &str = "result:error";
 
 // ── Shared application state ──────────────────────────────────────────────────
 
+/// Per-capture state that the hotkey action installs. The atomic flag and
+/// the winit close flag are flipped by the NEXT hotkey press to cancel the
+/// current capture mid-flight. Each pipeline task holds one of these for
+/// its entire lifetime and is expected to drop it on exit.
+pub struct ActiveCapture {
+    /// Set by a subsequent hotkey press to tell this capture "you're done".
+    /// Checked at every await point in `pipeline_inner`.
+    pub cancel: Arc<AtomicBool>,
+}
+
+impl ActiveCapture {
+    pub fn new() -> Self {
+        Self {
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Signal the owning pipeline to wind down. Idempotent.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        // Also force-close the winit overlay so the user sees the dim screen
+        // disappear immediately. The pipeline's pending mpsc recv() will block
+        // until the winit handler emits a Cancelled event OR the channel is
+        // dropped — we use cancel_capture() which doesn't send the event (see
+        // CaptureCommand::Cancel handler) so the pipeline just notices the
+        // channel closed and exits.
+        crate::capture_window::cancel_capture();
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     llm: Arc<LlmTranslateClient>,
@@ -48,7 +79,9 @@ struct AppState {
     /// save_settings can diff old vs new and unregister the right thing.
     current_hotkey: Arc<RwLock<String>>,
     current_settings_hotkey: Arc<RwLock<String>>,
-    capture_in_progress: Arc<RwLock<bool>>,
+    /// The single in-flight capture, if any. Replacing this value (a new
+    /// hotkey press) is how we cancel the previous one — see `cancel()`.
+    active_capture: Arc<Mutex<Option<ActiveCapture>>>,
 }
 
 impl AppState {
@@ -63,7 +96,7 @@ impl AppState {
             settings_path,
             current_hotkey: Arc::new(RwLock::new(hotkey)),
             current_settings_hotkey: Arc::new(RwLock::new(settings_hotkey)),
-            capture_in_progress: Arc::new(RwLock::new(false)),
+            active_capture: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -390,27 +423,59 @@ fn show_settings_window(app: &AppHandle) {
 async fn run_capture_pipeline(app: AppHandle) -> AppResult<()> {
     let state: State<'_, AppState> = app.state();
 
+    // Build a fresh cancel handle for THIS capture and install it as the
+    // active one. If there was an active capture, it gets cancelled first
+    // — its winit overlay disappears and its in-flight AI call winds down
+    // within ~100ms. We deliberately do NOT block on the previous task:
+    // it cleans up on its own schedule, and our new capture proceeds
+    // immediately. This is the core "no silent drops" guarantee.
+    let new_capture = ActiveCapture::new();
+    let cancel_handle = new_capture.cancel.clone();
+
     {
-        let mut in_progress = state.capture_in_progress.write().await;
-        if *in_progress {
-            return Err(AppError::Capture(
-                "capture already in progress, ignoring".into(),
-            ));
+        let mut slot = state.active_capture.lock().await;
+        if let Some(prev) = slot.take() {
+            println!("[capture] interrupting previous in-flight capture");
+            prev.cancel();
         }
-        *in_progress = true;
+        *slot = Some(new_capture);
     }
 
-    let outcome = pipeline_inner(&app, state.inner()).await;
-    *state.capture_in_progress.write().await = false;
+    let outcome = pipeline_inner(&app, state.inner(), &cancel_handle).await;
+
+    // If WE were the active capture, clear the slot so a subsequent press
+    // doesn't try to cancel a non-existent task. If a newer press already
+    // took our slot, that's fine — we just leave it alone.
+    {
+        let mut slot = state.active_capture.lock().await;
+        if let Some(active) = slot.as_ref() {
+            if Arc::ptr_eq(&active.cancel, &cancel_handle) {
+                *slot = None;
+            }
+        }
+    }
+
     outcome
 }
 
-async fn pipeline_inner(app: &tauri::AppHandle, state: &AppState) -> AppResult<()> {
+async fn pipeline_inner(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    cancel: &Arc<AtomicBool>,
+) -> AppResult<()> {
+    let cancelled = || cancel.load(Ordering::Relaxed);
+
     // 1. Capture the screen under the cursor.
+    if cancelled() {
+        return Ok(());
+    }
     let monitor = tokio::task::spawn_blocking(capture::find_cursor_monitor)
         .await
         .map_err(|e| AppError::Capture(format!("find monitor: {e}")))??;
 
+    if cancelled() {
+        return Ok(());
+    }
     let (rgba, img_w, img_h) = tokio::task::spawn_blocking(move || {
         capture::capture_screen_rgba(monitor.screen)
     })
@@ -423,9 +488,9 @@ async fn pipeline_inner(app: &tauri::AppHandle, state: &AppState) -> AppResult<(
     let rgba = Arc::new(rgba);
 
     // 2. Hand the image off to the native overlay window and wait for a
-    //    selection. The overlay window is closed by capture_window itself
-    //    the instant the user releases the mouse, so by the time we wake up
-    //    the dim screen is already gone.
+    //    selection. The overlay closes itself on mouse-up; a fresh hotkey
+    //    press closes it via cancel_capture(), which makes the winit overlay
+    //    exit, dropping our `event_tx` half and causing recv() to return Err.
     let (event_tx, event_rx) = mpsc::channel::<CaptureEvent>();
     capture_window::start_capture(
         rgba.clone(),
@@ -436,14 +501,25 @@ async fn pipeline_inner(app: &tauri::AppHandle, state: &AppState) -> AppResult<(
         event_tx,
     );
 
-    let selection = event_rx
-        .recv()
-        .map_err(|e| AppError::Capture(format!("capture channel closed: {e}")))?;
+    let selection = match event_rx.recv() {
+        Ok(s) => s,
+        Err(_) => {
+            // Channel closed — either user cancelled (Esc / right-click /
+            // close button) or a new hotkey press fired cancel_capture().
+            // In both cases we just exit cleanly; no output.
+            println!("[capture] aborted before selection completed");
+            return Ok(());
+        }
+    };
+
+    if cancelled() {
+        return Ok(());
+    }
 
     let rect = match selection {
         CaptureEvent::Selection { x, y, w, h } => CaptureRect { x, y, width: w, height: h },
         CaptureEvent::Cancelled => {
-            println!("user cancelled capture");
+            println!("[capture] user cancelled selection");
             return Ok(());
         }
     };
@@ -459,22 +535,38 @@ async fn pipeline_inner(app: &tauri::AppHandle, state: &AppState) -> AppResult<(
     //    network round-trip.
     if let Err(e) = show_result_window_busy(app, &png_b64) {
         eprintln!("failed to show result window: {e}");
-        // Fall through — the AI call will still try, even if we can't show
-        // the result window. The user can re-trigger if needed.
+    }
+
+    if cancelled() {
+        // User pressed the hotkey again while we were preparing. Drop the
+        // pending result — the new capture will produce its own.
+        let _ = emit_result_error(app, "已取消");
+        return Ok(());
     }
 
     // 5. Now make the actual AI call. The result window is already visible
     //    and showing the cropped image, so even a slow API doesn't feel
-    //    like a hang.
-    let translated = match state.llm.translate_png(&png_bytes).await {
+    //    like a hang. translate_png polls the cancel flag internally so a
+    //    fresh hotkey press can abort the in-flight HTTP within ~100ms.
+    let translated = match state.llm.translate_png(&png_bytes, Some(cancel)).await {
         Ok(t) => t,
         Err(e) => {
+            if matches!(e, AppError::Capture(ref m) if m == "cancelled") {
+                println!("[capture] AI call cancelled by new hotkey press");
+                let _ = emit_result_error(app, "已取消");
+                return Ok(());
+            }
             let _ = emit_result_error(app, &e.to_string());
             return Err(e);
         }
     };
 
-    // 6. Push the final text into the already-visible window.
+    // 6. Push the final text into the already-visible window. If we got
+    //    cancelled in the gap between AI returning and now, suppress the
+    //    output — a newer capture may already be showing its own result.
+    if cancelled() {
+        return Ok(());
+    }
     emit_result_loaded(app, &translated, &png_b64)?;
     Ok(())
 }
