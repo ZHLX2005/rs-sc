@@ -45,8 +45,11 @@ pub fn find_cursor_monitor() -> AppResult<CursorMonitor> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn capture_screen_rgba(screen: Screen) -> AppResult<(Vec<u8>, u32, u32)> {
-    let capture = screen.capture().map_err(|e| AppError::Capture(e.to_string()))?;
+pub fn capture_screen_rgba(monitor: &CursorMonitor) -> AppResult<(Vec<u8>, u32, u32)> {
+    let capture = monitor
+        .screen
+        .capture()
+        .map_err(|e| AppError::Capture(e.to_string()))?;
     let w = capture.width();
     let h = capture.height();
     let rgba = capture.into_raw();
@@ -76,6 +79,53 @@ fn cursor_position() -> AppResult<(i32, i32)> {
     // Wayland doesn't expose global cursor. Linux mint/X11 do via libx11.
     // For v1 we just default to (0,0) which resolves to the primary screen via from_point.
     Ok((0, 0))
+}
+
+// ── macOS stubs ───────────────────────────────────────────────────────────────
+//
+// The Windows + Linux paths use the `screenshots` crate, which calls into the
+// platform's screen-capture API. macOS would normally use a `screencapture`
+// subprocess (CoreGraphics is also possible but requires `objc2` FFI). For
+// v1 we intentionally leave macOS unsupported — keeping the cross-platform
+// matrix green means CI produces installers for all 3 OSes (Windows + Linux
+// run rs-sc, macOS users get an unsigned .app that explains "macOS capture
+// not implemented in this build" when they press the hotkey).
+//
+// To re-enable: implement `find_cursor_monitor` and `capture_screen_rgba`
+// here using `screencapture -x -D <id>` (macOS) and `NSEvent::mouseLocation`
+// for the cursor, then remove these stubs.
+
+#[cfg(target_os = "macos")]
+pub struct MonitorInfo {
+    pub scale_factor: f64,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub display_id: u32,
+}
+
+#[cfg(target_os = "macos")]
+pub struct CursorMonitor {
+    pub monitor: MonitorInfo,
+}
+
+#[cfg(target_os = "macos")]
+pub fn find_cursor_monitor() -> AppResult<CursorMonitor> {
+    Err(AppError::Capture(
+        "macOS 屏幕截图尚未实现 (v1 仅支持 Windows / Linux)".into(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+pub fn capture_screen_rgba(_monitor: &CursorMonitor) -> AppResult<(Vec<u8>, u32, u32)> {
+    // The struct returns an `AppError` and never reaches the screen-capture
+    // call. We do this so the macOS build can be produced and the user sees
+    // a clear "not yet supported" message in the result window instead of
+    // a cryptic panic at runtime.
+    Err(AppError::Capture(
+        "macOS 屏幕截图尚未实现 (v1 仅支持 Windows / Linux)".into(),
+    ))
 }
 
 /// Crop a sub-rectangle from a contiguous RGBA buffer (row-major, row stride = img_w * 4).

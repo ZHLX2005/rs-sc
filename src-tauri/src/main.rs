@@ -491,11 +491,30 @@ async fn pipeline_inner(
     if cancelled() {
         return Ok(());
     }
-    let (rgba, img_w, img_h) = tokio::task::spawn_blocking(move || {
-        capture::capture_screen_rgba(monitor.screen)
-    })
-    .await
-    .map_err(|e| AppError::Capture(format!("capture task: {e}")))??;
+    // capture_screen_rgba is platform-specific: on Windows/Linux it needs the
+    // `screenshots::Screen` handle (which is !Clone), on macOS it would need
+    // a `display_id: u32`. We resolve once here so the spawning task owns
+    // the right type, and the calling scope retains the `MonitorInfo` for
+    // positioning the overlay window below.
+    let (rgba, img_w, img_h, monitor_x, monitor_y, monitor_w, monitor_h) =
+        tokio::task::spawn_blocking(move || {
+            let (rgba, w, h) = capture::capture_screen_rgba(&monitor)?;
+            // Snapshot the monitor geometry for the overlay window position
+            // before the `Screen` handle is dropped at the end of this scope.
+            #[cfg(not(target_os = "macos"))]
+            let (mx, my, mw, mh) = {
+                let info = monitor.monitor;
+                (info.x, info.y, info.width, info.height)
+            };
+            #[cfg(target_os = "macos")]
+            let (mx, my, mw, mh) = {
+                let info = monitor.monitor;
+                (info.x, info.y, info.width, info.height)
+            };
+            Ok::<_, AppError>((rgba, w, h, mx, my, mw, mh))
+        })
+        .await
+        .map_err(|e| AppError::Capture(format!("capture task: {e}")))??;
 
     // Wrap the full-screen RGBA in an Arc. The capture overlay takes a clone
     // for painting; we keep one here for cropping the selected region. This
@@ -511,8 +530,8 @@ async fn pipeline_inner(
         rgba.clone(),
         img_w,
         img_h,
-        monitor.monitor.x,
-        monitor.monitor.y,
+        monitor_x,
+        monitor_y,
         event_tx,
     );
 
