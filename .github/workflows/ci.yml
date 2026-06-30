@@ -28,17 +28,32 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
+      # The Ubuntu image rolls forward every few months; libwebkit2gtk and
+      # libsoup have shipped breaking ABI changes. Fall back to older
+      # versions so the matrix survives an image bump.
+      # (Same pattern as project-graph's release workflow.)
       - name: Install Linux system deps
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
+          # Core build tools
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
             patchelf \
-            libxdo-dev \
-            libssl-dev
+            file
+          # GTK stack
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev
+          # WebKit2GTK — try 4.1 first, fall back to 4.0
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          # libsoup — try 3.0 first, fall back to 2.4
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
 
       - name: cargo check
         working-directory: src-tauri
