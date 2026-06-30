@@ -14,7 +14,7 @@ use std::sync::{mpsc, Arc, OnceLock};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Fullscreen, Window, WindowId, WindowLevel};
 
@@ -52,6 +52,19 @@ pub fn capture_proxy() -> EventLoopProxy<CaptureCommand> {
             std::thread::Builder::new()
                 .name("rs-sc-capture-loop".into())
                 .spawn(move || {
+                    // On Windows, opt in to receiving pointer messages even when
+                    // the system would otherwise suppress them. Some tablet
+                    // drivers and Windows Ink configurations route pen events
+                    // through WM_MOUSExxx rather than WM_POINTER; without this
+                    // call those pens never reach our overlay.
+                    #[cfg(target_os = "windows")]
+                    unsafe {
+                        extern "system" {
+                            fn EnableMouseInPointer(fEnable: i32) -> i32;
+                        }
+                        let _ = EnableMouseInPointer(1); // TRUE
+                    }
+
                     #[cfg(target_os = "windows")]
                     let event_loop = {
                         use winit::platform::windows::EventLoopBuilderExtWindows;
@@ -224,6 +237,84 @@ impl CaptureHandler {
         self.state = HandlerState::Idle;
         self._ctx_storage = None;
     }
+
+    /// Begin a drag selection at the current `mouse_pos`. Called from both the
+    /// `MouseInput::Left::Pressed` arm (regular mouse / some tablet drivers) and
+    /// from `WindowEvent::Touch::Started` (Windows Ink pen / digitizer that
+    /// winit delivers via the WM_POINTER path).
+    fn handle_drag_press(&mut self) {
+        if let HandlerState::Selecting(session) = &mut self.state {
+            session.drag_start = Some(session.mouse_pos);
+            session.is_dragging = true;
+            session.selection = None;
+        }
+    }
+
+    /// End a drag selection. If the user actually moved enough to make a real
+    /// rectangle, send it to the pipeline and close the dim overlay; otherwise
+    /// treat it as a cancel (so a single tap doesn't leave them stuck in
+    /// capture mode). Called from both `MouseInput::Left::Released` and
+    /// `WindowEvent::Touch::Ended`.
+    fn handle_drag_release(&mut self) {
+        // Phase 1: read what we need out of the session, then drop the borrow
+        // so phase 2 can mutate self.state via close_window().
+        let to_send = if let HandlerState::Selecting(session) = &mut self.state {
+            if session.is_dragging {
+                if let Some(start) = session.drag_start {
+                    let rect = normalize_rect(start, session.mouse_pos);
+                    session.selection = Some(rect);
+                }
+                session.is_dragging = false;
+                session.drag_start = None;
+                session
+                    .selection
+                    .filter(|(_, _, w, h)| *w > 4 && *h > 4)
+                    .map(|(x, y, w, h)| CaptureEvent::Selection { x, y, w, h })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(ev) = to_send {
+            let tx = if let HandlerState::Selecting(s) = &self.state {
+                s.event_tx.clone()
+            } else {
+                return;
+            };
+            self.close_window();
+            let _ = tx.send(ev);
+        } else {
+            self.close_window();
+        }
+    }
+
+    /// Update the cursor position. Called from both `CursorMoved` and
+    /// `WindowEvent::Touch::Moved` so tablet pens that don't generate
+    /// mouse-move events still drive the live drag rectangle.
+    fn handle_pen_move(&mut self, position: PhysicalPosition<f64>) {
+        if let HandlerState::Selecting(session) = &mut self.state {
+            session.mouse_pos = position;
+            if session.is_dragging {
+                session.window.request_redraw();
+            }
+        }
+    }
+
+    /// Cancel from a right-click, the close button, or a `Touch::Cancelled`
+    /// event (e.g. focus loss).
+    fn handle_cancel(&mut self) {
+        let tx = if let HandlerState::Selecting(s) = &self.state {
+            Some(s.event_tx.clone())
+        } else {
+            None
+        };
+        if let Some(tx) = tx {
+            let _ = tx.send(CaptureEvent::Cancelled);
+        }
+        self.close_window();
+    }
 }
 
 impl ApplicationHandler<CaptureCommand> for CaptureHandler {
@@ -281,67 +372,13 @@ impl ApplicationHandler<CaptureCommand> for CaptureHandler {
                 state,
                 button: MouseButton::Left,
                 ..
-            } => {
-                match state {
-                    ElementState::Pressed => {
-                        if let HandlerState::Selecting(session) = &mut self.state {
-                            session.drag_start = Some(session.mouse_pos);
-                            session.is_dragging = true;
-                            session.selection = None;
-                        }
-                    }
-                    ElementState::Released => {
-                        // Capture everything we need from the session, then drop
-                        // the borrow so we can call self.close_window() below.
-                        let to_send = if let HandlerState::Selecting(session) = &mut self.state {
-                            if session.is_dragging {
-                                if let Some(start) = session.drag_start {
-                                    let rect = normalize_rect(start, session.mouse_pos);
-                                    session.selection = Some(rect);
-                                }
-                                session.is_dragging = false;
-                                session.drag_start = None;
-                                // Build the Selection event while we still have the borrow.
-                                session
-                                    .selection
-                                    .filter(|(_, _, w, h)| *w > 4 && *h > 4)
-                                    .map(|(x, y, w, h)| CaptureEvent::Selection { x, y, w, h })
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-
-                        if let Some(ev) = to_send {
-                            // Pull the sender out (so we can use it after closing).
-                            let tx = if let HandlerState::Selecting(s) = &self.state {
-                                s.event_tx.clone()
-                            } else {
-                                // The session is already gone; nothing we can do.
-                                return;
-                            };
-                            // Close the dim overlay immediately — the user has
-                            // committed their selection, no reason to keep the
-                            // screen darkened while we wait for AI.
-                            self.close_window();
-                            let _ = tx.send(ev);
-                        } else {
-                            // Selection too small (or nothing was dragged) —
-                            // treat as cancel so the user gets out of capture mode.
-                            self.close_window();
-                        }
-                    }
-                }
-            }
+            } => match state {
+                ElementState::Pressed => self.handle_drag_press(),
+                ElementState::Released => self.handle_drag_release(),
+            },
 
             WindowEvent::CursorMoved { position, .. } => {
-                if let HandlerState::Selecting(session) = &mut self.state {
-                    session.mouse_pos = position;
-                    if session.is_dragging {
-                        session.window.request_redraw();
-                    }
-                }
+                self.handle_pen_move(position);
             }
 
             // Right-click cancels — matches every other screenshot tool on the planet.
@@ -349,28 +386,36 @@ impl ApplicationHandler<CaptureCommand> for CaptureHandler {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
-            } => {
-                let tx = if let HandlerState::Selecting(s) = &self.state {
-                    Some(s.event_tx.clone())
-                } else {
-                    None
-                };
-                if let Some(tx) = tx {
-                    let _ = tx.send(CaptureEvent::Cancelled);
+            } => self.handle_cancel(),
+
+            // Pen / digitizer / touch input. On Windows winit 0.30 delivers
+            // these via the WM_POINTER path as `WindowEvent::Touch`, NOT as
+            // `MouseInput`. Without this arm, a stylus / graphics tablet pen
+            // tap would be silently ignored — the dim overlay shows up but
+            // nothing you draw registers. We treat every `Touch` as a
+            // single-pointer selection (multi-finger is overkill for a
+            // region-capture tool).
+            WindowEvent::Touch(touch) => {
+                match touch.phase {
+                    TouchPhase::Started => {
+                        self.handle_pen_move(touch.location);
+                        self.handle_drag_press();
+                    }
+                    TouchPhase::Moved => {
+                        self.handle_pen_move(touch.location);
+                    }
+                    TouchPhase::Ended => {
+                        self.handle_pen_move(touch.location);
+                        self.handle_drag_release();
+                    }
+                    TouchPhase::Cancelled => {
+                        self.handle_cancel();
+                    }
                 }
-                self.close_window();
             }
 
             WindowEvent::CloseRequested => {
-                let tx = if let HandlerState::Selecting(s) = &self.state {
-                    Some(s.event_tx.clone())
-                } else {
-                    None
-                };
-                if let Some(tx) = tx {
-                    let _ = tx.send(CaptureEvent::Cancelled);
-                }
-                self.close_window();
+                self.handle_cancel();
             }
 
             _ => {}
