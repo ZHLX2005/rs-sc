@@ -1,5 +1,6 @@
 # Generated
-Cargo.lock
+# (Cargo.lock is committed for applications so CI gets reproducible builds;
+#  remove this line if this project ever becomes a library.)
 target/
 
 # Tauri generated
