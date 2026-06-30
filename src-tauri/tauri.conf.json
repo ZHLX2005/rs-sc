@@ -22,6 +22,7 @@
         "minWidth": 360,
         "minHeight": 200,
         "decorations": true,
+        "alwaysOnTop": true,
         "visible": false
       },
       {

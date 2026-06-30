@@ -9,6 +9,7 @@
   const thumbEl = document.getElementById("thumb");
   const copyBtn = document.getElementById("copy-btn");
   const closeBtn = document.getElementById("close-btn");
+  const pinBtn = document.getElementById("pin-btn");
 
   let lastText = "";
 
@@ -89,6 +90,22 @@
       w.getCurrentWindow().close();
     } else {
       window.close();
+    }
+  });
+
+  // Pin / unpin the result window above all other windows.
+  let pinned = true;
+  pinBtn.addEventListener("click", async () => {
+    pinned = !pinned;
+    pinBtn.classList.toggle("pinned", pinned);
+    pinBtn.title = pinned ? "取消置顶" : "置顶窗口";
+    pinBtn.textContent = pinned ? "📌" : "📍";
+    try {
+      await window.__TAURI__.core.invoke("set_result_always_on_top", {
+        onTop: pinned,
+      });
+    } catch (e) {
+      console.error("set_result_always_on_top failed:", e);
     }
   });
 

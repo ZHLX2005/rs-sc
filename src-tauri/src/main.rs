@@ -236,6 +236,7 @@ fn main() {
             get_settings,
             save_settings,
             test_connection,
+            set_result_always_on_top,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build tauri app")
@@ -332,6 +333,20 @@ where
 #[tauri::command]
 async fn test_connection(state: State<'_, AppState>) -> AppResult<String> {
     state.llm.probe().await
+}
+
+/// Toggle the result window's always-on-top state. Called from the pin button
+/// in `ui/result.html`. The window also gets re-pinned every time the pipeline
+/// shows it, so this is mainly for the user's manual override.
+#[tauri::command]
+fn set_result_always_on_top(app: AppHandle, on_top: bool) -> AppResult<()> {
+    let window = app
+        .get_webview_window(RESULT_WINDOW_LABEL)
+        .ok_or_else(|| AppError::Capture("result window missing from config".into()))?;
+    window
+        .set_always_on_top(on_top)
+        .map_err(|e| AppError::Capture(format!("set_always_on_top failed: {e}")))?;
+    Ok(())
 }
 
 // ── Hotkey management ────────────────────────────────────────────────────────
@@ -626,6 +641,12 @@ fn position_result_window_near_cursor(_app: &tauri::AppHandle, window: &tauri::W
     let py = if sy > 0.0 { (my + 24.0).min(sy - win_h - 24.0).max(24.0) } else { 120.0 };
     let _ = window.set_position(PhysicalPosition::new(px, py));
     let _ = window.set_size(PhysicalSize::new(win_w, win_h));
+    // Re-assert always-on-top on every show. Tauri's `alwaysOnTop: true` in
+    // tauri.conf.json sets the initial flag, but if the user uses a system
+    // shortcut (Win+Tab, "Show windows stacked") or our own future toggle,
+    // it can drift. Calling this every time keeps the result window pinned
+    // above the user's regular work no matter what.
+    let _ = window.set_always_on_top(true);
 }
 
 #[cfg(target_os = "windows")]

@@ -59,6 +59,14 @@ html, body {
 }
 .ghost:hover { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
 
+/* Pin button — accent-colored when the window is always-on-top */
+.ghost.pinned {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.ghost.pinned:hover { color: var(--accent); filter: brightness(1.1); }
+
 .result-body {
   display: flex;
   height: calc(100% - 80px);
