@@ -1,0 +1,166 @@
+name: Build & Release
+
+# Two trigger paths:
+#   - push of a tag matching "v*"   → build + publish a GitHub release
+#   - manual dispatch               → build only (artifacts only, no release)
+# PR/push events run the smaller `ci.yml` workflow (cargo check + test).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish a GitHub release from this run'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x64
+            bundle_paths: |
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            label: macos-x64
+            bundle_paths: |
+              src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app
+              src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            label: macos-arm64
+            bundle_paths: |
+              src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
+              src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            label: linux-x64
+            bundle_paths: |
+              src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+              src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install Linux system deps (webkit2gtk 4.1)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            libssl-dev
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Build release bundles
+        run: cargo tauri build --target ${{ matrix.target }}
+
+      # The default tauri.conf.json + Cargo.toml already declare the
+      # productName / identifier as "rs-sc" and the icons are present, so the
+      # bundled installers will be named rs-sc-*.exe / rs-sc-*.dmg / etc.
+
+      - name: Force ad-hoc codesign + zip the macOS app
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          # Unsigned Apple binaries trigger Gatekeeper warnings — ad-hoc
+          # signing gives them a valid signature so the bundle is at least
+          # structurally sound. Users still need to run `xattr -cr` to launch
+          # on first run; we document that in the README.
+          find src-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app" -exec codesign --force --deep --sign - {} \;
+          cd src-tauri/target/${{ matrix.target }}/release/bundle/macos
+          zip -r ../../../../../rs-sc-${{ matrix.label }}.zip *.app
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rs-sc-${{ matrix.label }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ matrix.bundle_paths }}
+            rs-sc-${{ matrix.label }}.zip
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    # Only runs on tag pushes OR when manually dispatched with publish_release=true
+    if: |
+      (startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List what we got
+        run: find artifacts -type f | sort
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Pick up every installer we produced on every platform.
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/*.msi
+            artifacts/**/*.dmg
+            artifacts/**/*.zip
+            artifacts/**/*.app
+            artifacts/**/*.deb
+            artifacts/**/*.AppImage
+          # For a tag push: create a release with the tag name.
+          # For manual dispatch: also create, but allow the user to delete
+          # drafts before publishing.
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          body: |
+            ## rs-sc — Rust Screen Capture
+
+            Hotkey → box-select → multimodal AI translate → floating result.
+            Pre-built binaries for Windows, macOS (Intel + Apple Silicon) and Linux.
+
+            > **macOS users:** first launch will be blocked by Gatekeeper. Run
+            > `xattr -cr /Applications/rs-sc.app` once to clear the quarantine
+            > flag, or right-click → Open the first time. (We don't have an
+            > Apple Developer ID; the bundles are ad-hoc signed.)
+
+            > **Windows users:** SmartScreen may warn on first run because the
+            > binary isn't code-signed. Click "More info" → "Run anyway".
+
+            See the [README](https://github.com/ZHLX2005/rs-sc#readme) for usage.
