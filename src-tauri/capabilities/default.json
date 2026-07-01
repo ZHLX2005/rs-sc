@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default-capability",
   "description": "Allow local app windows to use Tauri core APIs.",
-  "windows": ["result", "settings"],
+  "windows": ["result", "settings", "ink"],
   "permissions": [
     "core:default",
     "core:window:allow-show",

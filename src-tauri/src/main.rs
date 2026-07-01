@@ -35,9 +35,14 @@ use crate::capture_window::CaptureEvent;
 
 const RESULT_WINDOW_LABEL: &str = "result";
 const SETTINGS_WINDOW_LABEL: &str = "settings";
+const INK_WINDOW_LABEL: &str = "ink";
 const RESULT_LOADED_EVENT: &str = "result:loaded";
 const RESULT_BUSY_EVENT: &str = "result:busy";
 const RESULT_ERROR_EVENT: &str = "result:error";
+const INK_START_EVENT: &str = "ink:start";
+const INK_BUSY_EVENT: &str = "ink:busy";
+const INK_DONE_EVENT: &str = "ink:done";
+const INK_ERROR_EVENT: &str = "ink:error";
 
 // ── Shared application state ──────────────────────────────────────────────────
 
@@ -75,13 +80,27 @@ impl ActiveCapture {
 struct AppState {
     llm: Arc<LlmTranslateClient>,
     settings_path: PathBuf,
-    /// The hotkey currently registered with the OS. We track it explicitly so
-    /// save_settings can diff old vs new and unregister the right thing.
+    /// Currently-registered capture-translate hotkey. Tracked so save_settings
+    /// can diff old vs new and unregister the right thing.
     current_hotkey: Arc<RwLock<String>>,
     current_settings_hotkey: Arc<RwLock<String>>,
+    /// Currently-registered ink-flow hotkey.
+    current_ink_hotkey: Arc<RwLock<String>>,
     /// The single in-flight capture, if any. Replacing this value (a new
     /// hotkey press) is how we cancel the previous one — see `cancel()`.
     active_capture: Arc<Mutex<Option<ActiveCapture>>>,
+    /// Last screenshot taken by the ink flow (NOT the translation flow). The
+    /// ink flow needs to remember the boxed region so the user can ask
+    /// multiple handwriting questions against the same image.
+    last_ink_capture: Arc<RwLock<Option<LastInkCapture>>>,
+}
+
+/// PNG of the original (boxed) screenshot that the user is asking about
+/// about via handwriting. Stored separately from the capture_translate
+/// path so the two flows don't trample each other.
+#[derive(Clone)]
+struct LastInkCapture {
+    png_b64: String,
 }
 
 impl AppState {
@@ -90,13 +109,16 @@ impl AppState {
         settings_path: PathBuf,
         hotkey: String,
         settings_hotkey: String,
+        ink_hotkey: String,
     ) -> Self {
         Self {
             llm: Arc::new(llm),
             settings_path,
             current_hotkey: Arc::new(RwLock::new(hotkey)),
             current_settings_hotkey: Arc::new(RwLock::new(settings_hotkey)),
+            current_ink_hotkey: Arc::new(RwLock::new(ink_hotkey)),
             active_capture: Arc::new(Mutex::new(None)),
+            last_ink_capture: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -144,11 +166,12 @@ fn main() {
                 app_data_dir,
                 settings.hotkey.clone(),
                 settings.settings_hotkey.clone(),
+                settings.ink_hotkey.clone(),
             );
             app.manage(state.clone());
 
             // ── Wire close-to-hide on the secondary windows ───────────────────
-            for label in [RESULT_WINDOW_LABEL, SETTINGS_WINDOW_LABEL] {
+            for label in [RESULT_WINDOW_LABEL, SETTINGS_WINDOW_LABEL, INK_WINDOW_LABEL] {
                 if let Some(window) = app.get_webview_window(label) {
                     let w = window.clone();
                     window.on_window_event(move |event| {
@@ -161,10 +184,13 @@ fn main() {
             }
 
             // ── Register global hotkeys ──────────────────────────────────────
-            // Two hotkeys: one for capture (the main workflow), one for opening
-            // settings (a guaranteed way in even when the tray icon is hidden by
-            // Win11's notification area quirks — newly-added tray icons sometimes
-            // get swallowed into the overflow popup and aren't immediately visible).
+            // Three hotkeys:
+            //   1. capture hotkey → translate flow (existing)
+            //   2. settings hotkey → open settings panel
+            //   3. ink hotkey → handwriting question flow (new)
+            // The settings hotkey doubles as a guaranteed way to reach the
+            // settings when Win11 hides the tray icon — also lets the user
+            // re-bind any of the three without having to use the GUI.
             if let Err(e) = apply_hotkey(app.handle(), &settings.hotkey, run_capture_pipeline) {
                 eprintln!("failed to register capture hotkey '{}': {e}", settings.hotkey);
             } else {
@@ -180,6 +206,14 @@ fn main() {
                 );
             } else {
                 println!("settings hotkey: {}", settings.settings_hotkey);
+            }
+            if let Err(e) = apply_hotkey(app.handle(), &settings.ink_hotkey, run_ink_pipeline) {
+                eprintln!(
+                    "failed to register ink hotkey '{}': {e}",
+                    settings.ink_hotkey
+                );
+            } else {
+                println!("ink hotkey: {}", settings.ink_hotkey);
             }
 
             // ── System tray ───────────────────────────────────────────────────
@@ -237,6 +271,7 @@ fn main() {
             save_settings,
             test_connection,
             set_result_always_on_top,
+            submit_ink_question,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build tauri app")
@@ -272,9 +307,16 @@ async fn save_settings(
     if new_settings.settings_hotkey.trim().is_empty() {
         return Err(AppError::Capture("设置快捷键不能为空".into()));
     }
-    if new_settings.hotkey.trim().eq_ignore_ascii_case(new_settings.settings_hotkey.trim()) {
+    if new_settings.ink_hotkey.trim().is_empty() {
+        return Err(AppError::Capture("手写快捷键不能为空".into()));
+    }
+    let hk = |s: &str| s.trim().to_ascii_lowercase();
+    let h1 = hk(&new_settings.hotkey);
+    let h2 = hk(&new_settings.settings_hotkey);
+    let h3 = hk(&new_settings.ink_hotkey);
+    if h1 == h2 || h1 == h3 || h2 == h3 {
         return Err(AppError::Capture(
-            "截屏快捷键和设置快捷键不能相同".into(),
+            "截屏、设置、手写三个快捷键必须两两不同".into(),
         ));
     }
 
@@ -304,6 +346,17 @@ async fn save_settings(
             },
         )?;
         *state.current_settings_hotkey.write().await = new_settings.settings_hotkey.clone();
+    }
+
+    // 5b. Hot-swap the ink hotkey if it changed.
+    if new_settings.ink_hotkey != old.ink_hotkey {
+        swap_hotkey(
+            &app,
+            &old.ink_hotkey,
+            &new_settings.ink_hotkey,
+            run_ink_pipeline,
+        )?;
+        *state.current_ink_hotkey.write().await = new_settings.ink_hotkey.clone();
     }
 
     // 6. Persist to disk last — by this point every runtime side-effect has
@@ -347,6 +400,112 @@ fn set_result_always_on_top(app: AppHandle, on_top: bool) -> AppResult<()> {
         .set_always_on_top(on_top)
         .map_err(|e| AppError::Capture(format!("set_always_on_top failed: {e}")))?;
     Ok(())
+}
+
+/// Step 1 + Step 2 of the ink flow:
+///   Step 1 — OCR the user's handwriting into text.
+///   Step 2 — Send the OCR'd question + the original screenshot to the model
+///   and get the answer.
+///
+/// Returns the final answer text. Frontend listens for ink:busy / ink:done /
+/// ink:error events to show progress; the same ink window can call this
+/// repeatedly (clear canvas → write again → confirm) and the result window
+/// gets refreshed each time.
+#[tauri::command]
+async fn submit_ink_question(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    canvas_png_base64: String,
+) -> AppResult<String> {
+    use base64::engine::general_purpose::STANDARD as BASE64_STD;
+    use base64::Engine;
+
+    // 1. Decode the canvas PNG bytes.
+    let canvas_bytes = BASE64_STD
+        .decode(canvas_png_base64.trim())
+        .map_err(|e| AppError::Capture(format!("canvas base64 decode: {e}")))?;
+    if canvas_bytes.is_empty() {
+        return Err(AppError::Capture("canvas is empty".into()));
+    }
+
+    // 2. Fetch the stashed original screenshot (the boxed region the user
+    //    drew on). If the user closed the ink window before confirming this
+    //    is reachable — otherwise the ink flow always stores the latest.
+    let (original_b64, ocr_prompt, qa_prompt) = {
+        let last = state.last_ink_capture.read().await;
+        let last = last
+            .as_ref()
+            .ok_or_else(|| AppError::Capture("no ink capture in progress".into()))?;
+        let settings = Settings::load(&state.settings_path)?;
+        (
+            last.png_b64.clone(),
+            settings.ocr_prompt,
+            settings.qa_prompt,
+        )
+    };
+
+    let original_bytes = BASE64_STD.decode(original_b64.trim()).map_err(|e| {
+        AppError::Capture(format!("original screenshot base64 decode: {e}"))
+    })?;
+
+    // 3. Step 1 — OCR the handwriting.
+    let _ = app.emit_to(
+        INK_WINDOW_LABEL,
+        INK_BUSY_EVENT,
+        serde_json::json!({ "stage": "ocr" }),
+    );
+
+    let recognized_text = match state.llm.ocr_handwriting(&canvas_bytes, &ocr_prompt).await {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = app.emit_to(
+                INK_WINDOW_LABEL,
+                INK_ERROR_EVENT,
+                serde_json::json!({ "error": format!("OCR: {e}") }),
+            );
+            return Err(e);
+        }
+    };
+
+    // 4. Step 2 — QA with the original screenshot as context.
+    let _ = app.emit_to(
+        INK_WINDOW_LABEL,
+        INK_BUSY_EVENT,
+        serde_json::json!({ "stage": "qa" }),
+    );
+
+    let answer = match state
+        .llm
+        .qa_with_context(&recognized_text, &original_bytes, &qa_prompt)
+        .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = app.emit_to(
+                INK_WINDOW_LABEL,
+                INK_ERROR_EVENT,
+                serde_json::json!({ "error": format!("QA: {e}") }),
+            );
+            return Err(e);
+        }
+    };
+
+    // 5. Show the answer in the result window (which already has always-on-top
+    //    + pin + copy semantics from the translation flow). We also fire
+    //    ink:done so the ink window can show "用户问: X → AI 答: ..." in
+    //    its own status area.
+    emit_result_loaded(&app, &answer, &original_b64)?;
+
+    let _ = app.emit_to(
+        INK_WINDOW_LABEL,
+        INK_DONE_EVENT,
+        serde_json::json!({
+            "recognizedText": recognized_text,
+            "answer": answer,
+        }),
+    );
+
+    Ok(answer)
 }
 
 // ── Hotkey management ────────────────────────────────────────────────────────
@@ -602,6 +761,173 @@ async fn pipeline_inner(
         return Ok(());
     }
     emit_result_loaded(app, &translated, &png_b64)?;
+    Ok(())
+}
+
+// ── Ink flow: screenshot → handwriting window → OCR + QA ────────────────────
+//
+// This is a separate pipeline from the translation flow above. It reuses the
+// same capture_window overlay (same winit event loop, same Esc/right-click
+// cancel), but instead of immediately translating it stashes the screenshot
+// base64 in AppState and emits ink:start to the ink window. The user then
+// hand-writes a question and calls submit_ink_question, which runs OCR → QA.
+
+async fn run_ink_pipeline(app: AppHandle) -> AppResult<()> {
+    let state: State<'_, AppState> = app.state();
+
+    // Same cancel-and-restart pattern as run_capture_pipeline: replacing the
+    // active_capture flag cancels the previous capture so the user can mash
+    // the ink hotkey and never get "already in progress".
+    let new_capture = ActiveCapture::new();
+    let cancel_handle = new_capture.cancel.clone();
+
+    {
+        let mut slot = state.active_capture.lock().await;
+        if let Some(prev) = slot.take() {
+            println!("[ink] interrupting previous in-flight capture");
+            prev.cancel();
+        }
+        *slot = Some(new_capture);
+    }
+
+    let outcome = ink_pipeline_inner(&app, state.inner(), &cancel_handle).await;
+
+    {
+        let mut slot = state.active_capture.lock().await;
+        if let Some(active) = slot.as_ref() {
+            if Arc::ptr_eq(&active.cancel, &cancel_handle) {
+                *slot = None;
+            }
+        }
+    }
+
+    outcome
+}
+
+async fn ink_pipeline_inner(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+) -> AppResult<()> {
+    use std::sync::atomic::Ordering;
+    let cancelled = || cancel.load(Ordering::Relaxed);
+
+    // 1. Capture the screen under the cursor — IDENTICAL to pipeline_inner.
+    if cancelled() {
+        return Ok(());
+    }
+    let monitor = tokio::task::spawn_blocking(capture::find_cursor_monitor)
+        .await
+        .map_err(|e| AppError::Capture(format!("find monitor: {e}")))??;
+
+    if cancelled() {
+        return Ok(());
+    }
+    let (rgba, img_w, img_h, monitor_x, monitor_y, monitor_w, monitor_h) =
+        tokio::task::spawn_blocking(move || {
+            let (rgba, w, h) = capture::capture_screen_rgba(&monitor)?;
+            #[cfg(not(target_os = "macos"))]
+            let (mx, my, mw, mh) = {
+                let info = monitor.monitor;
+                (info.x, info.y, info.width, info.height)
+            };
+            #[cfg(target_os = "macos")]
+            let (mx, my, mw, mh) = {
+                let info = monitor.monitor;
+                (info.x, info.y, info.width, info.height)
+            };
+            Ok::<_, AppError>((rgba, w, h, mx, my, mw, mh))
+        })
+        .await
+        .map_err(|e| AppError::Capture(format!("capture task: {e}")))??;
+
+    if cancelled() {
+        return Ok(());
+    }
+
+    let rgba = Arc::new(rgba);
+
+    // 2. Hand to overlay, wait for selection.
+    let (event_tx, event_rx) = mpsc::channel::<CaptureEvent>();
+    capture_window::start_capture(
+        rgba.clone(),
+        img_w,
+        img_h,
+        monitor_x,
+        monitor_y,
+        event_tx,
+    );
+
+    let selection = match event_rx.recv() {
+        Ok(s) => s,
+        Err(_) => {
+            println!("[ink] aborted before selection completed");
+            return Ok(());
+        }
+    };
+
+    if cancelled() {
+        return Ok(());
+    }
+
+    let rect = match selection {
+        CaptureEvent::Selection { x, y, w, h } => CaptureRect { x, y, width: w, height: h },
+        CaptureEvent::Cancelled => {
+            println!("[ink] user cancelled selection");
+            return Ok(());
+        }
+    };
+
+    // 3. Crop & encode — same path as the translation flow.
+    let cropped = capture::crop_rgba(&rgba, img_w, rect.x, rect.y, rect.width, rect.height);
+    let png_bytes = capture::encode_png(&cropped, rect.width, rect.height)?;
+    let png_b64 = BASE64.encode(&png_bytes);
+
+    // 4. Stash the original screenshot for submit_ink_question to refer to.
+    *state.last_ink_capture.write().await = Some(LastInkCapture {
+        png_b64: png_b64.clone(),
+    });
+
+    // 5. Open the ink window and hand it the screenshot via ink:start. From
+    //    here on, the user controls the flow: they write, click confirm, the
+    //    frontend calls submit_ink_question. We do NOT call the LLM here.
+    show_ink_window(app, &png_b64, monitor_x, monitor_y, monitor_w, monitor_h)?;
+    Ok(())
+}
+
+fn show_ink_window(
+    app: &tauri::AppHandle,
+    image_b64: &str,
+    monitor_x: i32,
+    monitor_y: i32,
+    monitor_w: u32,
+    monitor_h: u32,
+) -> AppResult<()> {
+    let window = app
+        .get_webview_window(INK_WINDOW_LABEL)
+        .ok_or_else(|| AppError::Capture("ink window missing from config".into()))?;
+
+    // Position near the captured region so the ink window is right next to
+    // where the user just boxed, instead of popping up across the screen.
+    let win_w = 720.0_f64;
+    let win_h = 480.0_f64;
+    let px = (monitor_x as f64 + 24.0)
+        .min((monitor_x + monitor_w as i32) as f64 - win_w - 24.0)
+        .max(monitor_x as f64 + 24.0);
+    let py = (monitor_y as f64 + 24.0)
+        .min((monitor_y + monitor_h as i32) as f64 - win_h - 24.0)
+        .max(monitor_y as f64 + 24.0);
+
+    let _ = window.set_position(PhysicalPosition::new(px, py));
+    let _ = window.set_size(PhysicalSize::new(win_w, win_h));
+    let _ = window.set_always_on_top(true);
+    window.show()?;
+    window.set_focus()?;
+
+    window.emit(
+        INK_START_EVENT,
+        serde_json::json!({ "imageBase64": image_b64 }),
+    )?;
     Ok(())
 }
 

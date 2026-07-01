@@ -21,8 +21,9 @@ pub const DEFAULT_HOTKEY: &str = "CommandOrControl+Shift+T";
 pub const DEFAULT_SETTINGS_HOTKEY: &str = "CommandOrControl+Shift+P";
 
 /// What we persist to disk and round-trip to the frontend. Mirrors `LlmConfig`
-/// plus the two global hotkeys. Kept separate so we can add UI-only fields
-/// later without leaking them into the wire schema of the LLM client.
+/// plus the two global hotkeys and the two task-specific prompts (handwriting
+/// OCR + context-aware QA). Kept separate from `LlmConfig` because the OCR/QA
+/// flows only need a one-shot model call, not the live LLM translator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -32,6 +33,24 @@ pub struct Settings {
     pub prompt: String,
     pub hotkey: String,
     pub settings_hotkey: String,
+    /// Prompt used for Step 1 of the ink-question flow: recognize handwritten
+    /// text from a screenshot of the user's pen strokes.
+    #[serde(default)]
+    pub ocr_prompt: String,
+    /// Prompt used for Step 2 of the ink-question flow: combine the OCR'd
+    /// question with the original screenshot and ask the model to answer.
+    #[serde(default)]
+    pub qa_prompt: String,
+    /// Global hotkey that starts the ink flow (screenshot → handwriting
+    /// window → OCR + QA). Default `Ctrl+Shift+N`. Distinct from the regular
+    /// capture hotkey so the user's existing translation muscle-memory
+    /// keeps working without changes.
+    #[serde(default = "default_ink_hotkey")]
+    pub ink_hotkey: String,
+}
+
+fn default_ink_hotkey() -> String {
+    "CommandOrControl+Shift+N".to_string()
 }
 
 impl Settings {
@@ -47,6 +66,16 @@ impl Settings {
             hotkey: std::env::var("RSSC_HOTKEY").unwrap_or_else(|_| DEFAULT_HOTKEY.to_string()),
             settings_hotkey: std::env::var("RSSC_SETTINGS_HOTKEY")
                 .unwrap_or_else(|_| DEFAULT_SETTINGS_HOTKEY.to_string()),
+            ocr_prompt: std::env::var("RSSC_OCR_PROMPT").unwrap_or_else(|_| {
+                "你是一名精确的 OCR 助手。请精确识别图中的手写文字,仅输出文字本身。不要加引号、标点、解释或格式。"
+                    .to_string()
+            }),
+            qa_prompt: std::env::var("RSSC_QA_PROMPT").unwrap_or_else(|_| {
+                "用户在原图上手写了一句话提问,该提问的文字已通过 OCR 提取。请基于原图内容,直接、简洁地回答这个问题。"
+                    .to_string()
+            }),
+            ink_hotkey: std::env::var("RSSC_INK_HOTKEY")
+                .unwrap_or_else(|_| default_ink_hotkey()),
         }
     }
 
@@ -93,6 +122,15 @@ impl Settings {
                     }
                     if !parsed.settings_hotkey.is_empty() {
                         current.settings_hotkey = parsed.settings_hotkey;
+                    }
+                    if !parsed.ocr_prompt.is_empty() {
+                        current.ocr_prompt = parsed.ocr_prompt;
+                    }
+                    if !parsed.qa_prompt.is_empty() {
+                        current.qa_prompt = parsed.qa_prompt;
+                    }
+                    if !parsed.ink_hotkey.is_empty() {
+                        current.ink_hotkey = parsed.ink_hotkey;
                     }
                 }
                 Err(e) => {

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>rs-sc · 手写提问</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="ink-header">
+      <span class="dot"></span>
+      <span class="title">手写提问</span>
+      <span id="status" class="status info">等待截图...</span>
+      <button id="clear-btn" class="ghost" title="清空画板">清空</button>
+      <button id="close-btn" class="ghost" title="关闭">×</button>
+    </header>
+
+    <main class="ink-body">
+      <section id="thumb-pane" class="thumb-pane">
+        <div class="thumb-label">原图</div>
+        <img id="thumb" alt="原图缩略图" />
+      </section>
+
+      <section class="canvas-pane">
+        <canvas id="ink" width="900" height="380"></canvas>
+        <div id="empty-hint" class="empty-hint">在此手写提问 (支持数位板压感)</div>
+      </section>
+    </main>
+
+    <footer class="ink-footer">
+      <span id="recognized" class="recognized" hidden></span>
+      <span class="spacer"></span>
+      <button id="cancel-btn" class="ghost">取消</button>
+      <button id="confirm-btn" class="primary" disabled>确认 →</button>
+    </footer>
+
+    <script src="./ink.js"></script>
+  </body>
+</html>

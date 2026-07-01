@@ -104,6 +104,46 @@
             所以再给你一条直接进设置的快捷键兜底。
           </p>
         </div>
+
+        <div class="field">
+          <label for="inkHotkey">手写提问快捷键</label>
+          <div class="input-row">
+            <input
+              type="text"
+              id="inkHotkey"
+              name="inkHotkey"
+              placeholder="CommandOrControl+Shift+N"
+              required
+            />
+            <button type="button" id="record-ink-hotkey" class="ghost small" title="录制组合键">录制</button>
+          </div>
+          <p class="hint">
+            触发"数位板手写提问"流程:截屏 → 框选 → 在弹出窗口里用笔写字 → LLM 识别后回答。
+            <b>默认 Ctrl+Shift+N</b>。必须和上面两个快捷键都不同。
+          </p>
+        </div>
+
+        <div class="field">
+          <label for="ocrPrompt">手写识别 Prompt (OCR)</label>
+          <textarea
+            id="ocrPrompt"
+            name="ocrPrompt"
+            rows="3"
+            placeholder="你是一名精确的 OCR 助手。请精确识别图中的手写文字,仅输出文字本身..."
+          ></textarea>
+          <p class="hint">第一步:把用户手写内容识别成纯文本</p>
+        </div>
+
+        <div class="field">
+          <label for="qaPrompt">基于截图回答 Prompt (QA)</label>
+          <textarea
+            id="qaPrompt"
+            name="qaPrompt"
+            rows="3"
+            placeholder="用户在原图上手写了一句话提问..."
+          ></textarea>
+          <p class="hint">第二步:把识别出的文字 + 原始截图一起发给模型,让它回答</p>
+        </div>
       </form>
     </main>
 

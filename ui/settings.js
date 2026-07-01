@@ -13,6 +13,9 @@
     prompt: $("prompt"),
     hotkey: $("hotkey"),
     settingsHotkey: $("settingsHotkey"),
+    inkHotkey: $("inkHotkey"),
+    ocrPrompt: $("ocrPrompt"),
+    qaPrompt: $("qaPrompt"),
   };
 
   let recordingTarget = null; // which hotkey field is currently being recorded
@@ -46,6 +49,9 @@
       fields.prompt.value = settings.prompt || "";
       fields.hotkey.value = settings.hotkey || "";
       fields.settingsHotkey.value = settings.settingsHotkey || "";
+      fields.inkHotkey.value = settings.inkHotkey || "";
+      fields.ocrPrompt.value = settings.ocrPrompt || "";
+      fields.qaPrompt.value = settings.qaPrompt || "";
     } catch (e) {
       showStatus("error", "加载设置失败: " + (e?.message || e));
     }
@@ -61,6 +67,9 @@
       prompt: fields.prompt.value, // keep as-is (multiline)
       hotkey: fields.hotkey.value.trim(),
       settingsHotkey: fields.settingsHotkey.value.trim(),
+      inkHotkey: fields.inkHotkey.value.trim(),
+      ocrPrompt: fields.ocrPrompt.value, // keep as-is (multiline)
+      qaPrompt: fields.qaPrompt.value,   // keep as-is (multiline)
     };
   }
 
@@ -145,16 +154,27 @@
     startRecording(fields.settingsHotkey, $("record-settings-hotkey"));
   });
 
+  $("record-ink-hotkey").addEventListener("click", () => {
+    if (recordingTarget === fields.inkHotkey) {
+      stopRecording();
+      return;
+    }
+    stopRecording();
+    startRecording(fields.inkHotkey, $("record-ink-hotkey"));
+  });
+
   // Single global keydown listener: whichever field is recording gets filled.
   document.addEventListener("keydown", (e) => {
     if (!recordingTarget) return;
     e.preventDefault();
     if (e.key === "Escape") {
-      // cancel recording, restore original value
+      // cancel recording, restore original value for whichever target is active
       const orig =
         recordingTarget === fields.hotkey
           ? originalSettings?.hotkey
-          : originalSettings?.settingsHotkey;
+          : recordingTarget === fields.settingsHotkey
+          ? originalSettings?.settingsHotkey
+          : originalSettings?.inkHotkey;
       recordingTarget.value = orig || "";
       stopRecording();
       return;
@@ -175,10 +195,17 @@
     if (!newSettings.hotkey) return showStatus("error", "截屏快捷键不能为空");
     if (!newSettings.settingsHotkey)
       return showStatus("error", "设置快捷键不能为空");
+    if (!newSettings.inkHotkey)
+      return showStatus("error", "手写快捷键不能为空");
+    // Three hotkeys must all be pairwise distinct (case-insensitive).
+    const hk = (s) => s.toLowerCase();
+    const { hotkey, settingsHotkey, inkHotkey } = newSettings;
     if (
-      newSettings.hotkey.toLowerCase() === newSettings.settingsHotkey.toLowerCase()
+      hk(hotkey) === hk(settingsHotkey) ||
+      hk(hotkey) === hk(inkHotkey) ||
+      hk(settingsHotkey) === hk(inkHotkey)
     ) {
-      return showStatus("error", "截屏快捷键和设置快捷键不能相同");
+      return showStatus("error", "三个快捷键必须两两不同");
     }
 
     $("save-btn").disabled = true;
