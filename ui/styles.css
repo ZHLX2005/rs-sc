@@ -354,8 +354,19 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .ink-body {
   display: flex;
+  flex-direction: column;
   height: calc(100% - 110px);
   gap: 0;
+  overflow: hidden;
+}
+
+/* ── Ask pane: thumbnail + canvas, always visible ──────────────────── */
+
+.ask-pane {
+  flex: 0 0 auto;       /* shrink-to-fit, never grow */
+  display: flex;
+  min-height: 0;
+  border-bottom: 1px solid var(--line);
 }
 
 .thumb-pane {
@@ -367,6 +378,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow: hidden;
 }
 .thumb-label {
   font-size: 11px;
@@ -387,6 +399,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   position: relative;
   background: #fafafa;
   overflow: hidden;
+  min-height: 200px;
 }
 .canvas-pane canvas {
   display: block;
@@ -407,6 +420,88 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   user-select: none;
 }
 
+/* ── Answer pane: collapsed by default, slides open on AI reply ─────── */
+/*
+ * The answer area lives below the ask pane in the same window. When the
+ * AI responds, JS toggles `.open` and CSS animates the height in. This
+ * keeps the write surface stable (no reflow while the user is still
+ * drawing) while making the answer pop in front of the user without
+ * needing a separate popup window.
+ */
+
+.answer-pane {
+  flex: 0 0 0;
+  max-height: 0;
+  overflow: hidden;
+  background: #131922;
+  border-top: 1px solid transparent;
+  transition:
+    flex 280ms cubic-bezier(.2,.8,.2,1),
+    max-height 280ms cubic-bezier(.2,.8,.2,1),
+    border-color 280ms ease;
+  display: flex;
+}
+.answer-pane.open {
+  flex: 0 0 auto;
+  max-height: 60vh;     /* hard cap so a huge answer doesn't eat the ask pane */
+  border-top-color: var(--line);
+}
+
+.answer-inner {
+  padding: 14px 18px 16px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.answer-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--sub);
+  letter-spacing: 0.3px;
+}
+.answer-meta .recognized {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent);
+}
+.answer-meta #copy-btn { white-space: nowrap; }
+
+.answer-pane .result {
+  margin: 0;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.answer-status {
+  font-size: 12px;
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.answer-status.info {
+  background: #13161c;
+  color: var(--sub);
+}
+.answer-status.ok {
+  background: #11251a;
+  color: #6fd295;
+}
+.answer-status.error {
+  background: #2a1212;
+  color: #f0a0a0;
+}
+
 .ink-footer {
   display: flex;
   align-items: center;
@@ -415,13 +510,8 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   background: var(--card);
   border-top: 1px solid var(--line);
 }
-.ink-footer .recognized {
-  color: var(--accent);
-  font-size: 12px;
-  max-width: 60%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .ink-footer .spacer { flex: 1; }
 button.primary { /* defined in settings section */ }
+
+/* The .thought-badge rule is defined earlier (near the top, shared between
+   the result and ink windows). No duplicate needed here. */

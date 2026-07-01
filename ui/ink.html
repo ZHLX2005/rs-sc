@@ -10,27 +10,41 @@
     <header class="ink-header">
       <span class="dot"></span>
       <span class="title">手写提问</span>
-      <span id="status" class="status info">等待截图...</span>
-      <button id="clear-btn" class="ghost" title="清空画板">清空</button>
+      <span id="thought-badge" class="thought-badge" hidden>思考过</span>
+      <span id="status" class="status info">请手写提问</span>
+      <button id="pin-btn" class="ghost pinned" title="取消置顶">📌</button>
       <button id="close-btn" class="ghost" title="关闭">×</button>
     </header>
 
     <main class="ink-body">
-      <section id="thumb-pane" class="thumb-pane">
-        <div class="thumb-label">原图</div>
-        <img id="thumb" alt="原图缩略图" />
+      <!-- 提问区:原图 + 画板(始终展开,用户持续写) -->
+      <section class="ask-pane">
+        <div class="thumb-pane">
+          <div class="thumb-label">原图</div>
+          <img id="thumb" alt="原图缩略图" />
+        </div>
+        <div class="canvas-pane">
+          <canvas id="ink" width="900" height="380"></canvas>
+          <div id="empty-hint" class="empty-hint">在此手写提问 (支持数位板压感)</div>
+        </div>
       </section>
 
-      <section class="canvas-pane">
-        <canvas id="ink" width="900" height="380"></canvas>
-        <div id="empty-hint" class="empty-hint">在此手写提问 (支持数位板压感)</div>
+      <!-- 回答区:默认折叠,AI 答完展开,后续可继续追问 -->
+      <section id="answer-pane" class="answer-pane" aria-live="polite">
+        <div class="answer-inner">
+          <div class="answer-meta">
+            <span id="recognized" class="recognized" hidden></span>
+            <button id="copy-btn" class="ghost small" title="复制回答" hidden>复制</button>
+          </div>
+          <pre id="result" class="result" hidden></pre>
+          <p id="answer-status" class="answer-status"></p>
+        </div>
       </section>
     </main>
 
     <footer class="ink-footer">
-      <span id="recognized" class="recognized" hidden></span>
+      <button id="clear-btn" class="ghost">清空画板</button>
       <span class="spacer"></span>
-      <button id="cancel-btn" class="ghost">取消</button>
       <button id="confirm-btn" class="primary" disabled>确认 →</button>
     </footer>
 

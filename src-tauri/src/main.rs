@@ -272,6 +272,7 @@ fn main() {
             save_settings,
             test_connection,
             set_result_always_on_top,
+            set_ink_always_on_top,
             submit_ink_question,
         ])
         .build(tauri::generate_context!())
@@ -404,6 +405,21 @@ fn set_result_always_on_top(app: AppHandle, on_top: bool) -> AppResult<()> {
     Ok(())
 }
 
+/// Same as above but for the ink window. The merged ink UX keeps the answer
+/// inline, so users stay focused on the ink window for the whole Q&A loop —
+/// the pin button lets them keep it above other windows while they write a
+/// follow-up question.
+#[tauri::command]
+fn set_ink_always_on_top(app: AppHandle, on_top: bool) -> AppResult<()> {
+    let window = app
+        .get_webview_window(INK_WINDOW_LABEL)
+        .ok_or_else(|| AppError::Capture("ink window missing from config".into()))?;
+    window
+        .set_always_on_top(on_top)
+        .map_err(|e| AppError::Capture(format!("set_always_on_top failed: {e}")))?;
+    Ok(())
+}
+
 /// Ink flow (two-step):
 ///   Step 1 — OCR the user's handwriting. The frontend has already
 ///   composed the original screenshot and the handwriting into a
@@ -515,19 +531,19 @@ async fn submit_ink_question(
         }
     };
 
-    // 5. Show the answer in the result window (already always-on-top +
-    //    pin + copy from the translation flow). The original screenshot
-    //    is the preview, not the composite.
+    // 5. Show the answer in the in-window answer panel. The ink window
+    //    is now self-contained: it has its own answer area, so we don't
+    //    push anything to the (separate) result window any more.
+    //    `result:thinking` is fired only when a reasoning model emitted
+    //    `` and we successfully stripped it — the ink window uses this
+    //    to flash a brief "思考过" badge.
     if _qa_thought {
-        let _ = app.emit(
+        let _ = app.emit_to(
+            INK_WINDOW_LABEL,
             RESULT_THINKING_EVENT,
             serde_json::json!({ "thought": true }),
         );
     }
-    emit_result_loaded(&app, &answer, &original_b64)?;
-
-    // 6. Notify the ink window that we're done, with both the recognized
-    //    text and the answer so it can show them in the status footer.
     let _ = app.emit_to(
         INK_WINDOW_LABEL,
         INK_DONE_EVENT,
