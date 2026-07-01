@@ -404,22 +404,21 @@ fn set_result_always_on_top(app: AppHandle, on_top: bool) -> AppResult<()> {
     Ok(())
 }
 
-/// Ink flow (single-step):
-///   The frontend has already composed the original screenshot and the
-///   user's handwriting into a single PNG (vertical stack: original on top,
-///   handwriting on bottom, separated by a thin rule). We send that
-///   composite to the model with a prompt that asks it to do BOTH OCR
-///   of the handwriting AND answer the question, in one shot.
-///
-///   Why one call instead of separate OCR + QA:
-///     - Vision-language models recognize handwriting best in context;
-///       passing them a single image with both the screenshot and the
-///       handwriting lets them use visual cues (position, layout, what
-///       is near the writing) to disambiguate messy strokes.
-///     - A two-step pipeline (OCR → QA on the recognized text) compounds
-///       errors: if OCR gets \"你 好\" slightly wrong, the QA model
-///       has to work with bad context.
-///     - One call = one round-trip = lower latency, less prompt repetition.
+/// Ink flow (two-step):
+///   Step 1 — OCR the user's handwriting. The frontend has already
+///   composed the original screenshot and the handwriting into a
+///   single composite PNG (vertical stack: screenshot on top, handwriting
+///   on bottom, separated by a thin rule). The composite is what we
+///   send to the model — having the screenshot in the same image as
+///   the handwriting gives the OCR step *context*, which dramatically
+///   improves recognition accuracy on messy strokes. The prompt for
+///   this step is user-configurable (`ocr_prompt` in settings) so users
+///   can tune the OCR style independently of QA.
+///   Step 2 — Send the OCR'd text + the original screenshot (clean,
+///   without the handwriting overlay) to the model with a separate
+///   user-configurable prompt (`qa_prompt`). This step is the answer,
+///   not OCR, so it can have a totally different style/length/tone
+///   than the OCR step.
 ///
 /// Returns the final answer text. Frontend listens for ink:busy / ink:done /
 /// ink:error events to show progress; the same ink window can call this
@@ -434,8 +433,8 @@ async fn submit_ink_question(
     use base64::engine::general_purpose::STANDARD as BASE64_STD;
     use base64::Engine;
 
-    // 1. Decode the composite PNG. We treat the input as ONE image (the
-    //    frontend's stacking is invisible to us — we just see a flat PNG).
+    // 1. Decode the composite PNG. The composite is the SINGLE image
+    //    carrying both the screenshot (top) and the handwriting (bottom).
     let composite_bytes = BASE64_STD
         .decode(canvas_png_base64.trim())
         .map_err(|e| AppError::Capture(format!("composite base64 decode: {e}")))?;
@@ -443,27 +442,66 @@ async fn submit_ink_question(
         return Err(AppError::Capture("canvas is empty".into()));
     }
 
-    // 2. Load the configured QA prompt. The prompt is the user's template;
-    //    we wrap it so the model knows to do OCR + QA in the same call.
-    let qa_prompt = Settings::load(&state.settings_path)?.qa_prompt;
-    let wrapped_prompt = format!(
-        "{qa_prompt}\n\n[一次完成 OCR + 回答]\n图中上半部分是用户截的屏幕内容,下半部分是用户在手写区里用笔写下的提问。\
-         请先精确识别图中的手写文字(只输出文字本身,不要引号、不要前缀、不要解释),\
-         再基于上半部分的屏幕内容回答这个问题。回答请用中文,简洁直接。"
+    // 2. Pull the stashed original screenshot (the boxed region the user
+    //    drew on before the ink window opened) and the two configured
+    //    prompts. The original screenshot is the clean input to the QA
+    //    step (no handwriting overlay) so the model sees the pristine
+    //    pixels the user originally captured.
+    let (original_b64, ocr_prompt, qa_prompt) = {
+        let last = state.last_ink_capture.read().await;
+        let last = last
+            .as_ref()
+            .ok_or_else(|| AppError::Capture("no ink capture in progress".into()))?;
+        let settings = Settings::load(&state.settings_path)?;
+        (
+            last.png_b64.clone(),
+            settings.ocr_prompt,
+            settings.qa_prompt,
+        )
+    };
+
+    let original_bytes = BASE64_STD.decode(original_b64.trim()).map_err(|e| {
+        AppError::Capture(format!("original screenshot base64 decode: {e}"))
+    })?;
+
+    // 3. Step 1 — OCR the handwriting. The composite image is the input
+    //    (NOT just the bare canvas), so the model sees the screenshot
+    //    context while reading the strokes. The user-configured
+    //    ocr_prompt tells the model what to return.
+    let _ = app.emit_to(
+        INK_WINDOW_LABEL,
+        INK_BUSY_EVENT,
+        serde_json::json!({ "stage": "ocr" }),
     );
 
-    // 3. Fire the LLM call.
+    let recognized_text = match state
+        .llm
+        .ocr_handwriting(&composite_bytes, &ocr_prompt)
+        .await
+    {
+        Ok((t, _thought)) => t,
+        Err(e) => {
+            let _ = app.emit_to(
+                INK_WINDOW_LABEL,
+                INK_ERROR_EVENT,
+                serde_json::json!({ "error": format!("OCR: {e}") }),
+            );
+            return Err(e);
+        }
+    };
+
+    // 4. Step 2 — QA. The original screenshot (clean, no overlay) is the
+    //    context, the OCR'd text is the question, the user-configured
+    //    qa_prompt is the style instruction.
     let _ = app.emit_to(
         INK_WINDOW_LABEL,
         INK_BUSY_EVENT,
         serde_json::json!({ "stage": "qa" }),
     );
 
-    // The composite image IS the context. We pass an empty question string
-    // because the question is *inside* the image (as handwriting).
-    let (answer, _had_thinking) = match state
+    let (answer, _qa_thought) = match state
         .llm
-        .qa_with_context("", &composite_bytes, &wrapped_prompt)
+        .qa_with_context(&recognized_text, &original_bytes, &qa_prompt)
         .await
     {
         Ok(a) => a,
@@ -471,38 +509,30 @@ async fn submit_ink_question(
             let _ = app.emit_to(
                 INK_WINDOW_LABEL,
                 INK_ERROR_EVENT,
-                serde_json::json!({ "error": format!("问答: {e}") }),
+                serde_json::json!({ "error": format!("QA: {e}") }),
             );
             return Err(e);
         }
     };
 
-    // 4. Emit thinking badge (if model reasoned) and show answer in the
-    //    result window.
-    if _had_thinking {
+    // 5. Show the answer in the result window (already always-on-top +
+    //    pin + copy from the translation flow). The original screenshot
+    //    is the preview, not the composite.
+    if _qa_thought {
         let _ = app.emit(
             RESULT_THINKING_EVENT,
             serde_json::json!({ "thought": true }),
         );
     }
-    // Reuse the original screenshot base64 if we still have it (for the
-    // result window's thumbnail). Fall back to the composite itself.
-    let last = state.last_ink_capture.read().await;
-    let preview_b64 = last
-        .as_ref()
-        .map(|l| l.png_b64.clone())
-        .unwrap_or_else(|| canvas_png_base64.clone());
-    drop(last);
-    emit_result_loaded(&app, &answer, &preview_b64)?;
+    emit_result_loaded(&app, &answer, &original_b64)?;
 
-    // 5. Fire ink:done with the answer. We don't have a separate recognized
-    //    text anymore (the model did both at once), so the ink window just
-    //    shows the answer as-is.
+    // 6. Notify the ink window that we're done, with both the recognized
+    //    text and the answer so it can show them in the status footer.
     let _ = app.emit_to(
         INK_WINDOW_LABEL,
         INK_DONE_EVENT,
         serde_json::json!({
-            "recognizedText": "",
+            "recognizedText": recognized_text,
             "answer": answer,
         }),
     );

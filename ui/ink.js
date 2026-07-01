@@ -241,9 +241,10 @@
       busy = true;
       confirmBtn.disabled = true;
       clearBtn.disabled = true;
-      // The backend now does OCR + QA in a single LLM call, so we only
-      // show one busy stage.
-      setStatus("info", "提问中...");
+      // Two-step flow: OCR first, then QA.
+      if (p.stage === "ocr") setStatus("info", "识别手写中...");
+      else if (p.stage === "qa") setStatus("info", "基于截图回答中...");
+      else setStatus("info", "处理中...");
     });
     t.event.listen("ink:done", (event) => {
       const p = event.payload || {};
@@ -251,11 +252,15 @@
       confirmBtn.disabled = false;
       clearBtn.disabled = false;
       setStatus("ok", "✓ 已回答");
-      // recognizedText is empty in the single-step flow (model does OCR
-      // internally and returns the answer); we hide the recognized-text
-      // pill so the UI doesn't display an empty chip.
-      recognizedEl.hidden = true;
-      recognizedEl.textContent = "";
+      // Two-step flow now restores the recognized-text pill so the user
+      // can verify OCR got their question right.
+      if (p.recognizedText) {
+        recognizedEl.hidden = false;
+        recognizedEl.textContent = "识别: " + p.recognizedText;
+      } else {
+        recognizedEl.hidden = true;
+        recognizedEl.textContent = "";
+      }
     });
     t.event.listen("ink:error", (event) => {
       const p = event.payload || {};
