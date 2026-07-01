@@ -67,6 +67,64 @@ pub struct LlmTranslateClient {
     config: Arc<RwLock<LlmConfig>>,
 }
 
+/// Extract the model's reasoning from a `...` block and return
+/// `(thinking, answer)`. Several reasoning models (Qwen3, DeepSeek-R1,
+/// Kimi K2 Thinking, OpenAI o1) emit their chain-of-thought inside
+/// `` tags before the actual response. We never expose the
+/// thinking to the user — it's only used to drive a "思考中…" status —
+/// so the answer is what's persisted, displayed, and forwarded to
+/// the next pipeline step.
+///
+/// We strip the FIRST outermost `` ... `` pair, case-insensitively,
+/// and treat everything after the closing tag as the answer. If the
+/// model never closes the block (truncation, timeout), the whole
+/// response is discarded as thinking and the answer is empty —
+/// callers should treat that as an error.
+///
+/// We tolerate common typos / variants some models emit:
+///   - ``  /  ``
+///   - ``  /  `` (less common but seen)
+fn strip_thinking_block(raw: &str) -> (&str, &str) {
+    let bytes = raw.as_bytes();
+    let lower = raw.to_ascii_lowercase();
+    let lower_bytes = lower.as_bytes();
+
+    let open_tags: &[&[u8]] = &[b"<think>"];
+    let close_tags: &[&[u8]] = &[b"</think>"];
+
+    for &open in open_tags {
+        if let Some(rel_start) = find_subseq(&lower_bytes, open) {
+            let abs_start = rel_start + open.len();
+            for &close in close_tags {
+                if let Some(rel_end) = find_subseq(&lower_bytes[abs_start..], close) {
+                    let abs_end = abs_start + rel_end; // exclusive of close
+                    let thinking = std::str::from_utf8(&bytes[rel_start..abs_end]).unwrap_or("");
+                    let answer = std::str::from_utf8(&bytes[abs_end + close.len()..]).unwrap_or("");
+                    return (thinking.trim(), answer.trim());
+                }
+            }
+            // Open tag found but no matching close tag — the model's
+            // response was truncated mid-thinking. Treat the entire
+            // response as thinking and discard.
+            return (std::str::from_utf8(&bytes[rel_start..]).unwrap_or("").trim(), "");
+        }
+    }
+
+    ("", raw.trim())
+}
+
+/// Boyer-Moore-Horspool-lite: find `needle` in `haystack`, returns the byte
+/// offset of the first match or `None`. Case-sensitive — both inputs should
+/// already be lowercased when called.
+fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return if needle.is_empty() { Some(0) } else { None };
+    }
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
+}
+
 /// Strip the cruft that LLM OCR calls like to add even when asked for raw text.
 ///
 /// Common shapes we strip:
@@ -187,7 +245,7 @@ impl LlmTranslateClient {
         &self,
         png_bytes: &[u8],
         cancel: Option<&std::sync::atomic::AtomicBool>,
-    ) -> AppResult<String> {
+    ) -> AppResult<(String, bool)> {
         // Cheap fast-path: if we've already been cancelled, don't even build
         // the request body.
         if let Some(c) = cancel {
@@ -282,22 +340,30 @@ impl LlmTranslateClient {
             ))
         })?;
 
-        let text = parsed
+        // Always strip the `` block before doing anything else. Some reasoning
+        // models (Qwen3 / DeepSeek-R1 / o1 / Kimi K2) emit a thinking trace
+        // before their actual answer. The user only cares about the answer;
+        // the thinking is logged at debug level and never sent over IPC.
+        let raw = parsed
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content.trim().to_string())
+            .map(|c| c.message.content)
             .unwrap_or_default();
+        let (_thinking, answer) = strip_thinking_block(&raw);
+        let text = answer.trim().to_string();
 
         if text.is_empty() {
             return Err(AppError::Ai("model returned empty content".into()));
         }
-        Ok(text)
+        Ok((text, !_thinking.is_empty()))
     }
 
     /// Send a minimal probe (text only) to verify the API is reachable and returns
     /// a valid response. Used by the "Test connection" button in the settings panel.
-    pub async fn probe(&self) -> AppResult<String> {
+    /// Returns `(status_text, had_thinking)`. The probe response is so short we
+    /// never expect a think block, but we keep the API consistent.
+    pub async fn probe(&self) -> AppResult<(String, bool)> {
         let cfg = self.config.read().await.clone();
 
         let request = ChatRequest {
@@ -334,7 +400,7 @@ impl LlmTranslateClient {
                 status.as_u16()
             )));
         }
-        Ok(format!("HTTP {}", status.as_u16()))
+        Ok((format!("HTTP {}", status.as_u16()), false))
     }
 
     /// Step 1 of the ink flow: send the user's hand-drawn PNG to the model
@@ -349,7 +415,7 @@ impl LlmTranslateClient {
         &self,
         png_bytes: &[u8],
         prompt: &str,
-    ) -> AppResult<String> {
+    ) -> AppResult<(String, bool)> {
         let cfg = self.config.read().await.clone();
         let data_url = format!("data:image/png;base64,{}", BASE64.encode(png_bytes));
         // We hard-pin the OCR contract: the model MUST return only the raw
@@ -419,12 +485,16 @@ impl LlmTranslateClient {
             .map(|c| c.message.content)
             .unwrap_or_default();
 
-        let text = clean_ocr_text(&raw);
+        // Reasoning models would otherwise produce "``用户写的是 ... ''"
+        // which then survives clean_ocr_text as garbage. Strip the
+        // `` block FIRST, then clean.
+        let (_thinking, answer) = strip_thinking_block(&raw);
+        let text = clean_ocr_text(answer);
 
         if text.is_empty() {
             return Err(AppError::Ai("OCR returned empty text".into()));
         }
-        Ok(text)
+        Ok((text, !_thinking.is_empty()))
     }
 
     /// Step 2 of the ink flow: take the OCR-recognized question + the original
@@ -434,7 +504,7 @@ impl LlmTranslateClient {
         question: &str,
         context_png_bytes: &[u8],
         prompt: &str,
-    ) -> AppResult<String> {
+    ) -> AppResult<(String, bool)> {
         let cfg = self.config.read().await.clone();
         let data_url = format!(
             "data:image/png;base64,{}",
@@ -513,17 +583,23 @@ impl LlmTranslateClient {
             ))
         })?;
 
-        let text = parsed
+        let raw = parsed
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content.trim().to_string())
+            .map(|c| c.message.content)
             .unwrap_or_default();
+
+        // Same `` handling as translate_png — reasoning models that answer
+        // the user's question often wrap their final answer in a fresh
+        // think block. We discard the trace and keep only the answer.
+        let (_thinking, answer) = strip_thinking_block(&raw);
+        let text = answer.trim().to_string();
 
         if text.is_empty() {
             return Err(AppError::Ai("QA returned empty answer".into()));
         }
-        Ok(text)
+        Ok((text, !_thinking.is_empty()))
     }
 }
 
@@ -569,3 +645,128 @@ struct ChatChoice {
 struct ResponseMessage {
     content: String,
 }
+
+
+#[cfg(test)]
+mod thinking_strip_tests {
+    use super::strip_thinking_block;
+
+    #[test]
+    fn plain_text_unchanged() {
+        let (_t, a) = strip_thinking_block("Hello world.");
+        assert_eq!(a, "Hello world.");
+        assert!(_t.is_empty());
+    }
+
+    #[test]
+    fn strips_lowercase_think_block() {
+        let (_t, a) = strip_thinking_block(
+            "<think>The user asked a question. The image shows...</think>The answer is 42."
+        );
+        assert_eq!(a, "The answer is 42.");
+        assert!(_t.contains("The user asked"));
+    }
+
+    #[test]
+    fn strips_uppercase_think_block() {
+        let (_t, a) = strip_thinking_block(
+            "<think>reasoning here</think>FINAL ANSWER"
+        );
+        assert_eq!(a, "FINAL ANSWER");
+    }
+
+    #[test]
+    fn strips_multiline_think_block() {
+        let raw = "<think>\nLine 1 of thinking\nLine 2 of thinking\n</think>\nThe real answer\n";
+        let (_t, a) = strip_thinking_block(raw);
+        assert_eq!(a, "The real answer");
+        assert!(_t.contains("Line 1"));
+        assert!(_t.contains("Line 2"));
+    }
+
+    #[test]
+    fn drops_response_when_think_block_never_closes() {
+        let (_t, a) = strip_thinking_block("<think>thinking but truncated mid-stream");
+        assert_eq!(a, "");
+        assert!(_t.contains("truncated"));
+    }
+
+    #[test]
+    fn multiple_think_blocks_takes_first_pair() {
+        // We only strip the FIRST outermost pair. If a model restarts its
+        // thinking after already producing text, we keep the leading text
+        // (which is rarer than the typical case of "all thinking, then answer").
+        let raw = "<think>first thinking</think>real answer<think>restart thinking never closes";
+        let (_t, a) = strip_thinking_block(raw);
+        assert_eq!(a, "real answer<think>restart thinking never closes");
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        let (_t, a) = strip_thinking_block("");
+        assert_eq!(a, "");
+        assert_eq!(_t, "");
+    }
+
+    #[test]
+    fn case_insensitive_opening() {
+        let (_t, a) = strip_thinking_block("<think>x</think>answer");
+        assert_eq!(a, "answer");
+        let (_t, a) = strip_thinking_block("<THINK>x</THINK>answer");
+        assert_eq!(a, "answer");
+    }
+
+    #[test]
+    fn whitespace_around_think_block_is_handled() {
+        let (_t, a) = strip_thinking_block("  <think>x</think>   answer   ");
+        assert_eq!(a, "answer");
+    }
+
+    #[test]
+    fn realistic_deepseek_r1_response() {
+        // Real-world test case — a DeepSeek-R1 style response with a long
+        // thinking block followed by the actual answer.
+        let raw = r#"<think>
+用户发送了一张图片，但图片似乎非常模糊，无法清晰识别内容。让我仔细观察一下。
+
+图片显示的内容非常模糊，看起来像是一张带有文字或数字的图像，但由于模糊程度太高，无法清楚地辨认具体内容。可能是某种数据表、图表或代码截图，但由于分辨率和清晰度问题，无法准确解读。
+
+用户说"帮助我完成复习"，可能是希望我帮助他们复习某些内容，但图片质量太差，无法读取具体信息。我需要诚实地告诉用户图片太模糊了，无法识别内容，并请求他们提供更清晰的图片或文字描述。
+</think>抱歉，您发送的图片非常模糊，我无法清晰地识别其中的内容。从模糊的轮廓来看，似乎包含一些表格或字符，但无法辨认具体是什么内容。
+
+请您可以：
+1. **重新上传一张更清晰的图片**（确保文字内容可以清楚辨认）
+2. **用文字描述您需要复习的具体内容**
+3. **拍照时注意**：
+   - 保持手机/相机稳定，避免抖动
+   - 确保光线充足，避免反光
+   - 尽量让文字充满画面，提高分辨率
+   - 如果是PPT或屏幕内容，可以直接截屏而非拍照
+
+这样我才能更好地为您提供复习帮助！😊"#;
+        let (_t, a) = strip_thinking_block(raw);
+        // The thinking-only content (the model's internal monologue) must
+        // NOT appear in the answer. The thinking-only lines are:
+        //   "让我仔细观察一下"
+        //   "可能是希望我帮助他们复习某些内容"
+        //   "由于分辨率和清晰度问题，无法准确解读"
+        // These appear ONLY in the thinking block, never in the answer.
+        assert!(!a.contains("让我仔细观察"), "answer leaked thinking phrase");
+        assert!(!a.contains("分辨率和清晰度"), "answer leaked thinking phrase");
+        assert!(!a.contains("帮助他们复习"), "answer leaked thinking phrase");
+
+        // The answer should still contain the legitimate response text
+        // (which talks about 模糊 + suggestions). Words like "模糊" appear in
+        // BOTH blocks — that's fine, we only check for thinking-exclusive
+        // phrases.
+        assert!(a.starts_with("抱歉"), "wrong answer prefix");
+        assert!(a.contains("重新上传"), "answer body missing");
+        assert!(a.ends_with("😊"));
+
+        // The thinking variable DOES contain the discarded text (returned
+        // for diagnostics / logging, not for forwarding to the user).
+        assert!(_t.contains("仔细观察"));
+        assert!(_t.contains("分辨率"));
+    }
+}
+

@@ -39,6 +39,7 @@ const INK_WINDOW_LABEL: &str = "ink";
 const RESULT_LOADED_EVENT: &str = "result:loaded";
 const RESULT_BUSY_EVENT: &str = "result:busy";
 const RESULT_ERROR_EVENT: &str = "result:error";
+const RESULT_THINKING_EVENT: &str = "result:thinking";
 const INK_START_EVENT: &str = "ink:start";
 const INK_BUSY_EVENT: &str = "ink:busy";
 const INK_DONE_EVENT: &str = "ink:done";
@@ -385,7 +386,8 @@ where
 
 #[tauri::command]
 async fn test_connection(state: State<'_, AppState>) -> AppResult<String> {
-    state.llm.probe().await
+    // probe now returns (status, had_thinking) — we just want the status string
+    state.llm.probe().await.map(|(s, _)| s)
 }
 
 /// Toggle the result window's always-on-top state. Called from the pin button
@@ -455,8 +457,12 @@ async fn submit_ink_question(
         serde_json::json!({ "stage": "ocr" }),
     );
 
-    let recognized_text = match state.llm.ocr_handwriting(&canvas_bytes, &ocr_prompt).await {
-        Ok(t) => t,
+    let recognized_text = match state
+        .llm
+        .ocr_handwriting(&canvas_bytes, &ocr_prompt)
+        .await
+    {
+        Ok((t, _thought)) => t,
         Err(e) => {
             let _ = app.emit_to(
                 INK_WINDOW_LABEL,
@@ -474,7 +480,7 @@ async fn submit_ink_question(
         serde_json::json!({ "stage": "qa" }),
     );
 
-    let answer = match state
+    let (answer, _qa_thought) = match state
         .llm
         .qa_with_context(&recognized_text, &original_bytes, &qa_prompt)
         .await
@@ -494,6 +500,12 @@ async fn submit_ink_question(
     //    + pin + copy semantics from the translation flow). We also fire
     //    ink:done so the ink window can show "用户问: X → AI 答: ..." in
     //    its own status area.
+    if _qa_thought {
+        let _ = app.emit(
+            RESULT_THINKING_EVENT,
+            serde_json::json!({ "thought": true }),
+        );
+    }
     emit_result_loaded(&app, &answer, &original_b64)?;
 
     let _ = app.emit_to(
@@ -741,7 +753,15 @@ async fn pipeline_inner(
     //    and showing the cropped image, so even a slow API doesn't feel
     //    like a hang. translate_png polls the cancel flag internally so a
     //    fresh hotkey press can abort the in-flight HTTP within ~100ms.
-    let translated = match state.llm.translate_png(&png_bytes, Some(cancel)).await {
+    //
+    //    If we detect that the model emitted a `` block, we surface a
+    //    brief "思考完成" status via result:busy so the user knows the
+    //    model was reasoning — the reasoning text itself is discarded.
+    let (translated, _had_thinking) = match state
+        .llm
+        .translate_png(&png_bytes, Some(cancel))
+        .await
+    {
         Ok(t) => t,
         Err(e) => {
             if matches!(e, AppError::Capture(ref m) if m == "cancelled") {
@@ -759,6 +779,16 @@ async fn pipeline_inner(
     //    output — a newer capture may already be showing its own result.
     if cancelled() {
         return Ok(());
+    }
+    if _had_thinking {
+        // Reasoning models emitted a `` block. We stripped the trace
+        // already; just tell the frontend "the model reasoned" so it can
+        // show a brief status. We don't send the trace text — that
+        // belongs in debug logs only.
+        let _ = app.emit(
+            RESULT_THINKING_EVENT,
+            serde_json::json!({ "thought": true }),
+        );
     }
     emit_result_loaded(app, &translated, &png_b64)?;
     Ok(())

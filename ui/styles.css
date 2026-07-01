@@ -67,6 +67,27 @@ html, body {
 }
 .ghost.pinned:hover { color: var(--accent); filter: brightness(1.1); }
 
+/* "Reasoned" badge — shown briefly when a model emitted a `` block
+   that the backend stripped. We never show the trace, just a soft
+   flash to confirm "the model thought about it before answering". */
+.thought-badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  letter-spacing: 0.3px;
+}
+.thought-badge.flash {
+  animation: thought-flash 1.2s ease-out;
+}
+@keyframes thought-flash {
+  0%   { transform: scale(0.6); opacity: 0; }
+  20%  { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1.0); opacity: 1; }
+}
+
 .result-body {
   display: flex;
   height: calc(100% - 80px);

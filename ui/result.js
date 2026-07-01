@@ -19,6 +19,7 @@
     statusEl.classList.remove("status-error");
     resultEl.hidden = true;
     resultEl.textContent = "";
+    if (thoughtBadge) thoughtBadge.hidden = true;
     if (imageBase64) {
       thumbEl.src = "data:image/png;base64," + imageBase64;
       imagePane.hidden = false;
@@ -48,6 +49,17 @@
     resultEl.hidden = true;
   }
 
+  // Reasoning models (Qwen3 / DeepSeek-R1 / o1) emit a `` block that
+  // the backend strips. This badge is just visual confirmation that the
+  // model did internal reasoning — we never display the trace itself.
+  const thoughtBadge = document.getElementById("thought-badge");
+  function showThinkingBadge() {
+    if (!thoughtBadge) return;
+    thoughtBadge.hidden = false;
+    thoughtBadge.classList.add("flash");
+    setTimeout(() => thoughtBadge.classList.remove("flash"), 1200);
+  }
+
   // Listen for backend events. With withGlobalTauri = true we get window.__TAURI__.
   function bind() {
     const t = window.__TAURI__;
@@ -68,6 +80,12 @@
     t.event.listen("result:error", (event) => {
       const p = event.payload || {};
       showError(p.error || "未知错误");
+    });
+    // "result:thinking" — reasoning model emitted a `` block. We already
+    // stripped the trace; this just tells the user "the model thought
+    // about it" via a brief badge. The text itself is never displayed.
+    t.event.listen("result:thinking", () => {
+      showThinkingBadge();
     });
   }
 
