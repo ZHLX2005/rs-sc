@@ -17,3 +17,5 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+node_modules/
+test_output/
