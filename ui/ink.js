@@ -131,125 +131,94 @@
   }
 
   function encodeCanvasPng() {
-    // OCR-friendly preprocessing pipeline:
+    // Compose the screenshot + the user's handwriting into a single image
+    // and return it as base64 PNG.
     //
-    //   raw canvas (transparent BG, anti-aliased greyscale strokes)
-    //     ↓ 1. read pixel data
-    //     ↓ 2. find content bounding box (anything visibly drawn)
-    //     ↓ 3. crop to bbox with padding
-    //     ↓ 4. paint onto off-screen canvas: WHITE background + 2x upscale
-    //     ↓ 5. threshold each pixel → pure black or pure white
-    //     ↓ 6. export as PNG
+    // Why a single composite image (not separate image_url + canvas):
+    // Vision-language OCR is most accurate when the model can see the
+    // handwriting in its *spatial context* — i.e. right next to (or on top
+    // of) the original screenshot. Sending two unrelated images and asking
+    // the model to "merge" them is error-prone; sending one image where
+    // the screenshot is the top half and the handwriting is the bottom
+    // half (or vice versa) gives the model a clear, contiguous field.
     //
-    // Why this matters: handwriting samples submitted to multimodal LLMs
-    // recognize much better when they're:
-    //   (a) on a solid white background (no alpha-channel ambiguity)
-    //   (b) tightly cropped (no wasted whitespace the model has to ignore)
-    //   (c) high-resolution (smaller crops → bigger relative feature size)
-    //   (d) high-contrast b/w (LLM OCRs trained on scanned docs, not
-    //       anti-aliased greyscale pen strokes)
+    // We pick **vertical stacking**: original screenshot on top, handwriting
+    // canvas below, separated by a thin neutral gray rule. The order
+    // matches the ink window UI exactly (thumbnail pane on top, canvas
+    // pane on the bottom) so the model sees the same layout the user did.
     //
-    // The whole pipeline runs in <10ms on the user's machine — no extra
-    // Rust / server-side work.
-    const w = canvas.width;
-    const h = canvas.height;
-    if (w === 0 || h === 0) return "";
+    // Pure JS, <20ms, no Rust involvement.
 
-    let src;
-    try {
-      src = ctx.getImageData(0, 0, w, h);
-    } catch (e) {
-      // getImageData can throw on a tainted canvas (cross-origin image).
-      // Our canvas is fully local, so this shouldn't fire, but we fall
-      // back to the un-preprocessed image rather than failing the user's
-      // submission.
+    // 1. Need the original screenshot's bitmap. We keep a hidden <img>
+    //    (`thumbEl`) updated from the ink:start payload. Draw that into an
+    //    off-screen canvas to get its pixel dimensions.
+    const originalImg = thumbEl;
+    if (!originalImg.complete || !originalImg.naturalWidth) {
+      // Thumb hasn't loaded yet (race condition). Fall back to handwriting-only
+      // — worse than the composite, but at least the submit won't fail.
       return canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
     }
-    const px = src.data;
+    const origW = originalImg.naturalWidth;
+    const origH = originalImg.naturalHeight;
 
-    // 1. Find the content bounding box. A pixel is "ink" if its alpha is
-    //    > 8 (the user's stroke is at least faintly visible) and its
-    //    greyscale is darker than 240 (i.e. it's not background white).
-    //    We accept "somewhat transparent" strokes because a thin pen
-    //    tip often renders as alpha=30-80 in the anti-aliasing fringe.
-    let minX = w, minY = h, maxX = -1, maxY = -1;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = (y * w + x) * 4;
-        const a = px[i + 3];
-        if (a < 8) continue; // transparent — definitely background
-        const r = px[i], g = px[i + 1], b = px[i + 2];
-        // weighted luminance (ITU-R BT.601)
-        const lum = (r * 299 + g * 587 + b * 114) / 1000;
-        if (lum < 240) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
-      }
+    // 2. Compose onto an off-screen canvas.
+    //    Layout: top half = screenshot (letterboxed to a max width),
+    //            separator,
+    //            bottom half = handwriting canvas (also letterboxed to the
+    //            same max width so they line up nicely).
+    const SEP_HEIGHT = 8;
+    const MAX_TOTAL_WIDTH = 1600;   // cap so we don't send huge composites to the API
+
+    // Scale each section down if it would exceed the max width.
+    function fit(w, h, maxW) {
+      if (w <= maxW) return { w, h };
+      const scale = maxW / w;
+      return { w: maxW, h: Math.round(h * scale) };
     }
+    const origFit = fit(origW, origH, MAX_TOTAL_WIDTH);
+    const inkFit = fit(canvas.width, canvas.height, MAX_TOTAL_WIDTH);
 
-    // No content? Send a tiny blank PNG so the backend gets a valid image
-    // (the user clicked confirm with an empty canvas, but UI already
-    // disables confirm in that case — this is just defensive).
-    if (maxX < 0) {
-      return canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
-    }
+    const compW = Math.max(origFit.w, inkFit.w);
+    const compH = origFit.h + SEP_HEIGHT + inkFit.h;
 
-    // 2. Crop with padding so the OCR model sees whitespace around
-    //    characters (improves recognition rate). Pad proportionally
-    //    to the smaller dimension.
-    const contentW = maxX - minX + 1;
-    const contentH = maxY - minY + 1;
-    const pad = Math.max(20, Math.round(Math.min(contentW, contentH) * 0.15));
-    let cropX = Math.max(0, minX - pad);
-    let cropY = Math.max(0, minY - pad);
-    let cropW = Math.min(w - cropX, contentW + pad * 2);
-    let cropH = Math.min(h - cropY, contentH + pad * 2);
-    // Ensure crop width / height are positive
-    cropW = Math.max(1, cropW);
-    cropH = Math.max(1, cropH);
+    const comp = document.createElement("canvas");
+    comp.width = compW;
+    comp.height = compH;
+    const cctx = comp.getContext("2d");
 
-    // 3. Create an off-screen canvas at 2x scale, with WHITE background
-    //    so the LLM has unambiguous input.
-    const SCALE = 2;
-    const out = document.createElement("canvas");
-    out.width = cropW * SCALE;
-    out.height = cropH * SCALE;
-    const octx = out.getContext("2d");
-    octx.fillStyle = "#ffffff";
-    octx.fillRect(0, 0, out.width, out.height);
+    // Solid white background — multimodal OCR is most reliable on white.
+    cctx.fillStyle = "#ffffff";
+    cctx.fillRect(0, 0, compW, compH);
 
-    // 4. Draw the cropped source region onto the off-screen canvas at 2x.
-    //    We use imageSmoothingEnabled = false so the upscale is crisp
-    //    (nearest-neighbor) — important for tiny pen-tip pixels.
-    octx.imageSmoothingEnabled = false;
-    octx.drawImage(
-      canvas,
-      cropX, cropY, cropW, cropH,   // source rect
-      0, 0, out.width, out.height,   // dest rect (2x)
+    // 3. Paint the screenshot, centered horizontally.
+    cctx.drawImage(
+      originalImg,
+      (compW - origFit.w) / 2, 0,   // dst
+      origFit.w, origFit.h,
     );
 
-    // 5. Binarize — threshold each pixel. The alpha is already settled
-    //    (we drew onto a white BG, no transparency), so we just look at
-    //    luminance and snap to black-or-white.
-    const outImg = octx.getImageData(0, 0, out.width, out.height);
-    const opx = outImg.data;
-    for (let i = 0; i < opx.length; i += 4) {
-      const lum = (opx[i] * 299 + opx[i + 1] * 587 + opx[i + 2] * 114) / 1000;
-      // 180 is the sweet spot for handwritten strokes: darker than this
-      // is ink (write black), lighter is paper (write white). Tuned to
-      // match what scanned-document OCR training sets expect.
-      const v = lum < 180 ? 0 : 255;
-      opx[i] = v;
-      opx[i + 1] = v;
-      opx[i + 2] = v;
-      opx[i + 3] = 255;
-    }
-    octx.putImageData(outImg, 0, 0);
+    // 4. Thin separator rule.
+    cctx.fillStyle = "#cccccc";
+    cctx.fillRect(0, origFit.h, compW, SEP_HEIGHT);
 
-    return out.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
+    // 5. Paint the handwriting canvas onto a white background, centered.
+    //    The user's canvas has transparent background; we first draw a
+    //    white rect into the destination area so transparency shows up as
+    //    paper, not the renderer's checkered pattern.
+    cctx.fillStyle = "#ffffff";
+    cctx.fillRect(
+      (compW - inkFit.w) / 2,
+      origFit.h + SEP_HEIGHT,
+      inkFit.w,
+      inkFit.h,
+    );
+    cctx.drawImage(
+      canvas,
+      (compW - inkFit.w) / 2, origFit.h + SEP_HEIGHT,  // dst
+      inkFit.w, inkFit.h,
+    );
+
+    return comp.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
   }
 
   // ── Wire Tauri events ─────────────────────────────────────────────────
@@ -272,9 +241,9 @@
       busy = true;
       confirmBtn.disabled = true;
       clearBtn.disabled = true;
-      if (p.stage === "ocr") setStatus("info", "识别手写中...");
-      else if (p.stage === "qa") setStatus("info", "基于截图回答中...");
-      else setStatus("info", "处理中...");
+      // The backend now does OCR + QA in a single LLM call, so we only
+      // show one busy stage.
+      setStatus("info", "提问中...");
     });
     t.event.listen("ink:done", (event) => {
       const p = event.payload || {};
@@ -282,10 +251,11 @@
       confirmBtn.disabled = false;
       clearBtn.disabled = false;
       setStatus("ok", "✓ 已回答");
-      if (p.recognizedText) {
-        recognizedEl.hidden = false;
-        recognizedEl.textContent = "识别: " + p.recognizedText;
-      }
+      // recognizedText is empty in the single-step flow (model does OCR
+      // internally and returns the answer); we hide the recognized-text
+      // pill so the UI doesn't display an empty chip.
+      recognizedEl.hidden = true;
+      recognizedEl.textContent = "";
     });
     t.event.listen("ink:error", (event) => {
       const p = event.payload || {};
